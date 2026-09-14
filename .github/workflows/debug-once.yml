@@ -1,10 +1,17 @@
 name: Debug APK (one-time)
 
-# 只用于手动出一个可安装的 debug APK，不参与 push/PR 流程。
+# 只用于出一个可安装的 debug APK，不参与项目的测试/发布流程。
+#
 # 注意：本项目有两个 submodule 直接参与 Gradle 构建
 # (np-submodule/accompanist-lyrics-core 与 .../accompanist-lyrics-ui/src)，
 # checkout 时必须带 submodules: recursive，否则编译直接失败。
+#
+# 为什么用 push 触发而不是只用 workflow_dispatch：GitHub 只注册默认分支上的 workflow，
+# 这个文件只存在于功能分支时 dispatch 会返回 404。push 触发不受该限制。
 on:
+  push:
+    branches:
+      - lx-custom-source
   workflow_dispatch:
 
 jobs:
