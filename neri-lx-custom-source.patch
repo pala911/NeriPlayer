@@ -1,0 +1,2646 @@
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -45,6 +45,7 @@
+ uiGraphics = "1.11.4"
+ workRuntimeKtx = "2.11.2"
+ javascriptengine = "1.1.0"
++quickjs = "2.4.0"
+ webkit = "1.16.0"
+ lyriconProvider = "0.1.70"
+ zxingCore = "3.5.4"
+@@ -75,6 +76,7 @@
+ androidx-ui-graphics = { module = "androidx.compose.ui:ui-graphics", version.ref = "uiGraphics" }
+ androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workRuntimeKtx" }
+ androidx-javascriptengine = { module = "androidx.javascriptengine:javascriptengine", version.ref = "javascriptengine" }
++quickjs-wrapper = { module = "wang.harlon.quickjs:wrapper-android", version.ref = "quickjs" }
+ androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "webkit" }
+ coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coilCompose" }
+ dec = { module = "org.brotli:dec", version.ref = "dec" }
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -31,6 +31,14 @@
+     releaseKeyAlias.isNotBlank() &&
+     !releaseKeyPassword.isNullOrBlank()
+ 
++// debug 包默认用 AGP 自己生成的 debug keystore，而它的位置与内容在不同 CI runner 上会变，
++// 于是每次构建的签名都不同，`adb install -r` 会报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
++// 只能卸载重装（丢掉应用数据）。用属性显式指定一个固定 keystore 就能避免；
++// 不传该属性时行为与原来完全一致。
++val debugKeystorePath = project.findProperty("NERI_DEBUG_KEYSTORE") as String?
++val debugKeystoreFile = debugKeystorePath?.let { project.file(it) }
++val debugSigningReady = debugKeystoreFile?.exists() == true
++
+ android {
+     namespace = "moe.ouom.neriplayer"
+     val buildUUID = UUID.randomUUID()
+@@ -47,6 +55,14 @@
+                 keyPassword = releaseKeyPassword.orEmpty()
+             }
+         }
++        if (debugSigningReady) {
++            create("debugFixed") {
++                storeFile = debugKeystoreFile
++                storePassword = "android"
++                keyAlias = "androiddebugkey"
++                keyPassword = "android"
++            }
++        }
+     }
+ 
+     println(" __  __                     ____    ___                                     \n" +
+@@ -90,6 +106,12 @@
+     buildTypes {
+         val releaseSigningConfig = signingConfigs.getByName("release")
+ 
++        debug {
++            if (debugSigningReady) {
++                signingConfig = signingConfigs.getByName("debugFixed")
++            }
++        }
++
+         release {
+             isMinifyEnabled = true
+             isShrinkResources = true
+@@ -329,6 +351,10 @@
+     implementation(libs.androidx.work.runtime.ktx)
+     implementation(libs.androidx.javascriptengine)
+ 
++    // 自定义音源（LX Music 用户脚本）：需要可同步求值的 JS 引擎，
++    // androidx.javascriptengine 的 API 全异步、不适用于该交互模型。
++    implementation(libs.quickjs.wrapper)
++
+     implementation(libs.androidx.webkit)
+ 
+     // 取主题色
+diff --git a/.github/workflows/debug-once.yml b/.github/workflows/debug-once.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/debug-once.yml
+@@ -0,0 +1,76 @@
++name: Debug APK (one-time)
++
++# 只用于出一个可安装的 debug APK，不参与项目的测试/发布流程。
++#
++# 注意：本项目有两个 submodule 直接参与 Gradle 构建
++# (np-submodule/accompanist-lyrics-core 与 .../accompanist-lyrics-ui/src)，
++# checkout 时必须带 submodules: recursive，否则编译直接失败。
++#
++# 为什么用 push 触发而不是只用 workflow_dispatch：GitHub 只注册默认分支上的 workflow，
++# 这个文件只存在于功能分支时 dispatch 会返回 404。push 触发不受该限制。
++on:
++  push:
++    branches:
++      - lx-custom-source
++  workflow_dispatch:
++
++jobs:
++  build-debug:
++    runs-on: ubuntu-latest
++    timeout-minutes: 90
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++        with:
++          submodules: recursive
++
++      - name: Set up JDK 17
++        uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: 17
++          cache: gradle
++
++      # runner 镜像自带 Android SDK/NDK，但 compileSdk 37 比较新，显式装一次更稳；
++      # 装不上就让 AGP 自己的下载器去解析（android.builder.sdkDownload 默认开启）。
++      - name: Ensure Android SDK 37
++        run: |
++          yes | sdkmanager --licenses >/dev/null 2>&1 || true
++          sdkmanager "platforms;android-37" || echo "SKIP: letting AGP resolve the compile SDK"
++
++      # debug 包默认用 AGP 自己生成的 debug keystore，位置与内容随 runner 变化，
++      # 于是每次构建签名都不同，`adb install -r` 会报签名不一致、只能卸载重装丢数据。
++      # 缓存一份固定 keystore 并通过 -PNERI_DEBUG_KEYSTORE 显式指定。
++      - name: Reuse a stable debug keystore
++        uses: actions/cache@v4
++        with:
++          path: ~/.neri-debug/debug.keystore
++          key: neri-debug-keystore-v1
++
++      - name: Ensure debug keystore
++        run: |
++          mkdir -p ~/.neri-debug
++          if [ ! -f ~/.neri-debug/debug.keystore ]; then
++            keytool -genkeypair -v -keystore ~/.neri-debug/debug.keystore \
++              -storepass android -keypass android -alias androiddebugkey \
++              -keyalg RSA -keysize 2048 -validity 10000 \
++              -dname "CN=Android Debug,O=Android,C=US"
++          fi
++          ls -l ~/.neri-debug/debug.keystore
++          keytool -list -keystore ~/.neri-debug/debug.keystore -storepass android | tail -n 3
++
++      - name: Grant execute permission
++        run: chmod +x gradlew
++
++      - name: Assemble Debug APK
++        run: |
++          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
++            -PNERI_DEBUG_KEYSTORE="$HOME/.neri-debug/debug.keystore"
++
++      - name: Upload Debug APK
++        uses: actions/upload-artifact@v4
++        with:
++          name: NeriPlayer-debug-${{ github.sha }}
++          path: app/build/outputs/apk/debug/*.apk
++          if-no-files-found: error
++          retention-days: 3
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntime.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntime.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntime.kt
+@@ -0,0 +1,892 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import com.whl.quickjs.android.QuickJSLoader
++import com.whl.quickjs.wrapper.JSCallFunction
++import com.whl.quickjs.wrapper.JSFunction
++import com.whl.quickjs.wrapper.JSObject
++import com.whl.quickjs.wrapper.QuickJSContext
++import com.whl.quickjs.wrapper.QuickJSObject
++import moe.ouom.neriplayer.core.logging.NPLogger
++import java.io.Closeable
++import java.security.KeyFactory
++import java.security.MessageDigest
++import java.security.spec.X509EncodedKeySpec
++import java.util.Base64
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.ConcurrentLinkedQueue
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.atomic.AtomicReference
++import javax.crypto.Cipher
++import javax.crypto.spec.IvParameterSpec
++import javax.crypto.spec.SecretKeySpec
++import okhttp3.MediaType.Companion.toMediaTypeOrNull
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.RequestBody.Companion.toRequestBody
++import org.json.JSONArray
++import org.json.JSONObject
++
++private const val HTTP_TIMEOUT_MS = 13_000L
++/**
++ * Default ceiling for one action when the caller does not set one. Sources fire a
++ * telemetry request before the real one, so this has to cover two round trips.
++ */
++private const val ACTION_DRAIN_TIMEOUT_MS = 12_000L
++private const val JSON_MEDIA_TYPE = "application/json; charset=utf-8"
++private const val TEXT_MEDIA_TYPE = "text/plain; charset=utf-8"
++
++/**
++ * Client for the script-facing `lx.request` bridge. Per-request call timeouts are
++ * applied by [LxUserRuntime] through `newBuilder()`, so only the socket-level
++ * defaults live here.
++ */
++private val lxHttpClient: OkHttpClient by lazy {
++    OkHttpClient.Builder()
++        .connectTimeout(15, TimeUnit.SECONDS)
++        .readTimeout(20, TimeUnit.SECONDS)
++        .followRedirects(true)
++        .build()
++}
++
++data class LxUserScript(
++    val source: String,
++    val metadata: LxUserScriptMetadata = LxUserScriptMetadata.parse(source),
++)
++
++/** What a script declares through `lx.send(lx.EVENT_NAMES.inited, info)`. */
++data class LxUserSourceCapability(
++    val actions: List<String> = emptyList(),
++    val qualitys: List<String> = emptyList(),
++)
++
++/**
++ * Self-contained LX Music user API runtime.
++ *
++ * Exposes the standard JavaScript surface that real LX user sources depend on:
++ * - globalThis.lx.request(url, options, callback)
++ * - globalThis.lx.on(globalThis.lx.EVENT_NAMES.request, async handler)
++ * - globalThis.lx.send(globalThis.lx.EVENT_NAMES.inited, info)
++ * - globalThis.lx.utils.crypto / buffer
++ * - globalThis.lx.currentScriptInfo, version, env
++ * - console.log / warn / error
++ * - setTimeout
++ * - Promise draining so async handlers resolve before the caller continues.
++ */
++class LxUserRuntime(
++    private val httpClient: OkHttpClient = lxHttpClient,
++) : Closeable {
++    private val context = createContext()
++    private val requestHandlers = mutableListOf<JSFunction>()
++    private val sourceQualities = mutableMapOf<String, List<String>>()
++    private val sourceCapabilities = mutableMapOf<String, LxUserSourceCapability>()
++    private val timers = ConcurrentHashMap<Int, Pair<Long, JSCallFunction>>()
++    private var nextTimerId = 1
++    private val closed = AtomicBoolean(false)
++
++    private data class HttpResponse(
++        val callback: JSFunction,
++        val error: String?,
++        val result: Map<String, Any?>?,
++        val body: Any?,
++    )
++
++    private val pendingHttpResponses = ConcurrentLinkedQueue<HttpResponse>()
++    private val drainSignal = Object()
++
++    init {
++        installGlobals()
++    }
++
++    fun load(script: LxUserScript): LxUserScriptMetadata {
++        val info = script.metadata
++        NPLogger.d(TAG, "load start name=${info.name.orEmpty()} bytes=${script.source.toByteArray().size}")
++        context.evaluate("var module = { exports: {} }; var exports = module.exports;", "lx-module.js")
++        context.globalObject.getJSObjectProperty("lx")?.let { lx ->
++            lx.getJSObjectProperty("currentScriptInfo")?.apply {
++                setProperty("name", info.name.orEmpty())
++                setProperty("version", info.version.orEmpty())
++                setProperty("author", info.author.orEmpty())
++                setProperty("description", info.description.orEmpty())
++                setProperty("homepage", info.homepage.orEmpty())
++                setProperty("rawScript", script.source)
++            }
++        }
++        context.evaluate(script.source, "lx-user.js")
++        // v5 sources commonly fetch remote configuration before registering the
++        // request listener. Drain that initialization before the first action.
++        drainScriptInitialization()
++        NPLogger.d(TAG, "load done name=${info.name.orEmpty()} handlers=${requestHandlers.size} sources=${sourceCapabilities}")
++        return info
++    }
++
++    /** Invokes a V5 action (musicUrl, lyric, or pic) and returns its raw result. */
++    fun callAction(
++        action: String,
++        args: Map<String, Any?>,
++        timeoutMs: Long = ACTION_DRAIN_TIMEOUT_MS,
++    ): Any? {
++        require(action == "musicUrl" || action == "lyric" || action == "pic") {
++            "Unsupported LX action: $action"
++        }
++        val source = args["source"]?.toString() ?: "kw"
++        val info = mapOf(
++            "type" to (args["type"] ?: "128k"),
++            "musicInfo" to (args["musicInfo"] ?: args),
++        )
++
++        val resultRef = AtomicReference<Any?>()
++        val errorRef = AtomicReference<Throwable?>()
++        val done = CountDownLatch(1)
++
++        // When the runtime is reused across songs it can still be holding the reply to
++        // an earlier action whose drain budget ran out - the HTTP thread keeps going
++        // after the caller gives up. Dropping it here stops a late answer from being
++        // handed to this action.
++        pendingHttpResponses.clear()
++
++        val requestArg = createJsObject(mapOf("source" to source, "action" to action, "info" to info))
++        // LX keeps a single request handler: a second lx.on('request') replaces the
++        // first one. Use the newest registration so re-registering scripts win.
++        val handler = requestHandlers.lastOrNull()
++        NPLogger.d(TAG, "action start source=$source quality=${args["type"]} handler=${handler != null} export=${handler == null}")
++        val returned = if (handler != null) {
++            handler.call(requestArg)
++        } else {
++            val global = context.globalObject
++            val globalFunction = global.getJSFunctionProperty("musicUrl")
++            val module = global.getJSObjectProperty("module")
++            val exported = module?.getJSObjectProperty("exports")
++            val function = globalFunction ?: exported?.getJSFunctionProperty("musicUrl")
++            if (function == null) {
++                throw IllegalStateException("LX request handler is not registered")
++            }
++            val musicInfo = (args["musicInfo"] as? Map<*, *>)
++                ?.let { createJsObject(it.toStringKeyedMap()) }
++                ?: createJsObject(args)
++            function.call(musicInfo, args["type"]?.toString() ?: "128k")
++        }
++        settle(returned, onSuccess = { value ->
++            resultRef.set(value)
++            done.countDown()
++        }, onError = { error ->
++            errorRef.set(error)
++            done.countDown()
++        })
++
++        drainUntil(done, timeoutMs)
++        errorRef.get()?.let { throw it }
++        val resolved = resultRef.get()
++        if (action != "musicUrl") {
++            val hostResolved = if (resolved is QuickJSObject) resolved.toMap() else resolved
++            NPLogger.d(TAG, "action done source=$source action=$action result=${responseShape(hostResolved)}")
++            return hostResolved
++        }
++        val url = if (resolved is String) resolved else urlFrom(resolved)
++        NPLogger.d(TAG, "action done source=$source result=${if (url.isNullOrBlank()) "empty" else "url"}")
++        return url
++    }
++
++    /** Returns the best quality this source declared through lx.send(inited, ...). */
++    fun qualityFor(source: String, requested: String): String {
++        val supported = sourceQualities[source].orEmpty()
++        if (supported.isEmpty() || requested in supported) return requested
++        val requestedIndex = QUALITY_ORDER.indexOf(requested).takeIf { it >= 0 } ?: QUALITY_ORDER.lastIndex
++        return QUALITY_ORDER.asReversed()
++            .firstOrNull { it in supported && QUALITY_ORDER.indexOf(it) <= requestedIndex }
++            ?: supported.firstOrNull()
++            ?: requested
++    }
++
++    /** Sources the script announced through `lx.send('inited', ...)`. */
++    fun declaredSources(): Map<String, LxUserSourceCapability> = sourceCapabilities.toMap()
++
++    /**
++     * Whether the script announced support for [action] on [source]. Scripts that
++     * never announce anything are treated as supporting everything so that older
++     * sources keep working.
++     */
++    fun supports(source: String, action: String): Boolean {
++        val capability = sourceCapabilities[source] ?: return true
++        return capability.actions.isEmpty() || action in capability.actions
++    }
++
++    fun sentEvents(): List<Pair<String, Any?>> = emptyList()
++
++    private fun installGlobals() {
++        val console = context.createNewJSObject()
++        listOf("log", "info", "warn", "error", "debug", "group", "groupEnd", "table", "time", "timeEnd").forEach { name ->
++            console.setProperty(name, JSCallFunction { null })
++        }
++        context.globalObject.setProperty("console", console)
++
++        context.globalObject.setProperty("setTimeout", JSCallFunction { args ->
++            val callback = args.firstOrNull() as? JSFunction ?: return@JSCallFunction 0
++            val delayMs = (args.getOrNull(1) as? Number)?.toLong()?.coerceIn(0L, 60_000L) ?: 0L
++            val params = args.drop(2)
++            val id = nextTimerId++
++            timers[id] = (System.currentTimeMillis() + delayMs) to JSCallFunction { callback.call(*params.toTypedArray()) }
++            id
++        })
++        context.globalObject.setProperty("clearTimeout", JSCallFunction { args ->
++            (args.firstOrNull() as? Number)?.toInt()?.let(timers::remove)
++            null
++        })
++
++        val lx = context.createNewJSObject()
++        val eventNames = context.createNewJSObject().apply {
++            setProperty("request", "request")
++            setProperty("inited", "inited")
++            setProperty("updateAlert", "updateAlert")
++        }
++        lx.setProperty("EVENT_NAMES", eventNames)
++        lx.setProperty("request", JSCallFunction { args ->
++            val url = args.getOrNull(0)?.toString().orEmpty()
++            val options = args.getOrNull(1)
++            val callback = args.getOrNull(2) as? JSFunction
++            executeHttpRequest(url, options, callback)
++        })
++        lx.setProperty("on", JSCallFunction { args ->
++            val event = args.getOrNull(0)?.toString().orEmpty()
++            val handler = args.getOrNull(1) as? JSFunction
++            if (event == "request" && handler != null) requestHandlers.add(handler)
++            NPLogger.d(TAG, "event on name=$event registered=${handler != null} total=${requestHandlers.size}")
++            context.evaluate("Promise.resolve()")
++        })
++        lx.setProperty("send", JSCallFunction { args ->
++            val event = args.firstOrNull()?.toString().orEmpty()
++            when (event) {
++                "inited" -> recordSourceInfo(args.getOrNull(1))
++                "updateAlert" -> NPLogger.i(TAG, "event updateAlert received")
++            }
++            NPLogger.d(TAG, "event send name=$event")
++            context.evaluate("Promise.resolve()")
++        })
++        lx.setProperty("utils", createUtils())
++        lx.setProperty("currentScriptInfo", context.createNewJSObject())
++        lx.setProperty("version", "2.0.0")
++        lx.setProperty("env", "mobile")
++        context.globalObject.setProperty("lx", lx)
++
++        installBuiltins()
++        lockdownSandbox()
++    }
++
++    /**
++     * Adds the JS built-ins that QuickJS does not always ship but that LX Music
++     * user sources rely on: UTF-8 codecs, base64 helpers and `fetch`.
++     */
++    private fun installBuiltins() {
++        context.evaluate(
++            """
++            (function() {
++              'use strict'
++              var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
++              function utf8Bytes(input) {
++                var text = String(input == null ? '' : input)
++                var out = []
++                for (var i = 0; i < text.length; i++) {
++                  var code = text.charCodeAt(i)
++                  if (code < 0x80) { out.push(code) }
++                  else if (code < 0x800) { out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f)) }
++                  else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
++                    var next = text.charCodeAt(++i)
++                    var point = 0x10000 + (((code & 0x3ff) << 10) | (next & 0x3ff))
++                    out.push(0xf0 | (point >> 18), 0x80 | ((point >> 12) & 0x3f), 0x80 | ((point >> 6) & 0x3f), 0x80 | (point & 0x3f))
++                  } else { out.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)) }
++                }
++                return out
++              }
++              function utf8String(bytes) {
++                var out = []
++                for (var i = 0; i < bytes.length; i++) {
++                  var byte = bytes[i] & 0xff
++                  if (byte < 0x80) { out.push(String.fromCharCode(byte)) }
++                  else if (byte < 0xe0) { out.push(String.fromCharCode(((byte & 0x1f) << 6) | (bytes[++i] & 0x3f))) }
++                  else if (byte < 0xf0) { out.push(String.fromCharCode(((byte & 0x0f) << 12) | ((bytes[++i] & 0x3f) << 6) | (bytes[++i] & 0x3f))) }
++                  else {
++                    var point = ((byte & 0x07) << 18) | ((bytes[++i] & 0x3f) << 12) | ((bytes[++i] & 0x3f) << 6) | (bytes[++i] & 0x3f)
++                    point -= 0x10000
++                    out.push(String.fromCharCode(0xd800 + (point >> 10), 0xdc00 + (point & 0x3ff)))
++                  }
++                }
++                return out.join('')
++              }
++              if (typeof globalThis.TextEncoder === 'undefined') {
++                globalThis.TextEncoder = function TextEncoder() {}
++                globalThis.TextEncoder.prototype.encode = function(value) { return new Uint8Array(utf8Bytes(value)) }
++              }
++              if (typeof globalThis.TextDecoder === 'undefined') {
++                globalThis.TextDecoder = function TextDecoder(encoding) { this.encoding = encoding || 'utf-8' }
++                globalThis.TextDecoder.prototype.decode = function(value) { return value ? utf8String(value) : '' }
++              }
++              if (typeof globalThis.btoa === 'undefined') {
++                globalThis.btoa = function(value) {
++                  var bytes = utf8Bytes(value)
++                  var out = ''
++                  for (var i = 0; i < bytes.length; i += 3) {
++                    var b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2]
++                    out += B64[b0 >> 2]
++                    out += B64[((b0 & 0x03) << 4) | ((b1 === undefined ? 0 : b1) >> 4)]
++                    out += b1 === undefined ? '=' : B64[((b1 & 0x0f) << 2) | ((b2 === undefined ? 0 : b2) >> 6)]
++                    out += b2 === undefined ? '=' : B64[b2 & 0x3f]
++                  }
++                  return out
++                }
++              }
++              if (typeof globalThis.atob === 'undefined') {
++                globalThis.atob = function(value) {
++                  var text = String(value).replace(/[^A-Za-z0-9+/]/g, '')
++                  var bytes = []
++                  for (var i = 0; i < text.length; i += 4) {
++                    var c0 = B64.indexOf(text[i]), c1 = B64.indexOf(text[i + 1])
++                    var c2 = B64.indexOf(text[i + 2]), c3 = B64.indexOf(text[i + 3])
++                    if (c1 >= 0) bytes.push((c0 << 2) | (c1 >> 4))
++                    if (c2 >= 0) bytes.push(((c1 & 0x0f) << 4) | (c2 >> 2))
++                    if (c3 >= 0) bytes.push(((c2 & 0x03) << 6) | c3)
++                  }
++                  return utf8String(bytes)
++                }
++              }
++              if (typeof globalThis.fetch === 'undefined' && typeof globalThis.lx !== 'undefined') {
++                globalThis.fetch = function(input, init) {
++                  return new Promise(function(resolve, reject) {
++                    var url = typeof input === 'string' ? input : (input && input.url) || ''
++                    var options = init || {}
++                    globalThis.lx.request(url, {
++                      method: options.method || 'get',
++                      headers: options.headers || {},
++                      body: options.body,
++                      binary: options.binary === true
++                    }, function(err, resp, body) {
++                      if (err) { reject(new Error((err && err.message) || String(err) || 'fetch failed')); return }
++                      var headers = (resp && resp.headers) || {}
++                      resolve({
++                        ok: resp.statusCode >= 200 && resp.statusCode < 300,
++                        status: resp.statusCode,
++                        statusText: resp.statusMessage || '',
++                        url: resp.url || url,
++                        headers: {
++                          get: function(name) {
++                            var target = String(name).toLowerCase()
++                            for (var key in headers) { if (String(key).toLowerCase() === target) return headers[key] }
++                            return null
++                          }
++                        },
++                        text: function() { return Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)) },
++                        json: function() { return Promise.resolve(typeof body === 'string' ? JSON.parse(body) : body) }
++                      })
++                    })
++                  })
++                }
++              }
++            })()
++            """.trimIndent(),
++            "lx-builtins.js",
++        )
++    }
++
++    /**
++     * LX Music runs user scripts in a bare QuickJS context and obfuscated sources
++     * legitimately use `eval` / `new Function` to unpack themselves, so dynamic code
++     * execution stays available. Every native bridge is still removed and `lx`
++     * stays frozen: a script can only reach the network through `lx.request`.
++     */
++    private fun lockdownSandbox() {
++        context.evaluate(
++            """
++            (function() {
++              'use strict'
++              // Remove dangerous globals if present.
++              delete globalThis.java
++              delete globalThis.Java
++              delete globalThis.JNI
++              delete globalThis.importClass
++              delete globalThis.importPackage
++
++              // Make the LX object non-writable so scripts cannot replace it.
++              try {
++                Object.defineProperty(globalThis, 'lx', {
++                  value: globalThis.lx,
++                  writable: false,
++                  configurable: false,
++                  enumerable: true
++                })
++              } catch (e) {}
++            })()
++            """.trimIndent(),
++            "sandbox-lockdown.js",
++        )
++    }
++
++    private fun createUtils(): JSObject {
++        val utils = context.createNewJSObject()
++        val crypto = context.createNewJSObject()
++        crypto.setProperty("md5", JSCallFunction { args ->
++            // LX Music mobile hashes encodeURIComponent(str), not the raw string.
++            // Sources derive signed query strings from this, so the quirk matters.
++            val input = encodeUriComponent(args.firstOrNull()?.toString().orEmpty())
++            MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
++                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
++        })
++        crypto.setProperty("randomBytes", JSCallFunction { args ->
++            val size = (args.firstOrNull() as? Number)?.toInt()?.coerceIn(0, 65_536) ?: 0
++            val data = ByteArray(size).also { java.security.SecureRandom().nextBytes(it) }
++            createJsArray(data.map { it.toInt() and 0xff })
++        })
++        crypto.setProperty("aesEncrypt", JSCallFunction { args ->
++            val data = bytes(args.getOrNull(0))
++            val mode = args.getOrNull(1)?.toString().orEmpty()
++            val key = bytes(args.getOrNull(2))
++            val iv = bytes(args.getOrNull(3))
++            val transformation = if (mode == "aes-128-cbc") "AES/CBC/PKCS5Padding" else "AES/ECB/NoPadding"
++            val encrypted = Cipher.getInstance(transformation).apply {
++                init(
++                    Cipher.ENCRYPT_MODE,
++                    SecretKeySpec(key, "AES"),
++                    if (transformation.contains("CBC")) IvParameterSpec(iv) else null,
++                )
++            }.doFinal(data)
++            createJsArray(encrypted.map { it.toInt() and 0xff })
++        })
++        crypto.setProperty("rsaEncrypt", JSCallFunction { args ->
++            val data = bytes(args.getOrNull(0))
++            val keyText = args.getOrNull(1)?.toString()?.replace("-----BEGIN PUBLIC KEY-----", "")
++                ?.replace("-----END PUBLIC KEY-----", "") ?: ""
++            val keyBytes = Base64.getDecoder().decode(keyText)
++            val key = KeyFactory.getInstance("RSA").generatePublic(X509EncodedKeySpec(keyBytes))
++            val encrypted = Cipher.getInstance("RSA/ECB/NoPadding")
++                .apply { init(Cipher.ENCRYPT_MODE, key) }.doFinal(data)
++            createJsArray(encrypted.map { it.toInt() and 0xff })
++        })
++        utils.setProperty("crypto", crypto)
++
++        val buffer = context.createNewJSObject()
++        buffer.setProperty("from", JSCallFunction { args ->
++            val data = bytes(args.getOrNull(0), args.getOrNull(1)?.toString())
++            createJsArray(data.map { it.toInt() and 0xff })
++        })
++        buffer.setProperty("bufToString", JSCallFunction { args ->
++            val format = args.getOrNull(1)?.toString()
++            if (format == "binary") {
++                args.getOrNull(0)
++            } else {
++                val data = bytes(args.getOrNull(0))
++                when (format) {
++                    "hex" -> data.joinToString("") { "%02x".format(it.toInt() and 0xff) }
++                    "base64" -> Base64.getEncoder().encodeToString(data)
++                    else -> data.toString(Charsets.UTF_8)
++                }
++            }
++        })
++        utils.setProperty("buffer", buffer)
++        return utils
++    }
++
++    /**
++     * Mirrors `lx.request(url, options, callback)` from the LX Music mobile preload
++     * and returns the abort function that the preload hands back to the script.
++     */
++    private fun executeHttpRequest(url: String, optionsValue: Any?, callback: JSFunction?): JSCallFunction {
++        val abort = JSCallFunction { null }
++        if (callback == null) return abort
++        if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
++            enqueueHttpResponse(HttpResponse(callback, "Unsupported URL scheme: $url", null, null))
++            return abort
++        }
++        val options = when (optionsValue) {
++            is QuickJSObject -> optionsValue.toMap()
++            is Map<*, *> -> optionsValue
++            else -> emptyMap<String, Any?>()
++        }
++        val method = (options["method"] as? String)?.uppercase() ?: "GET"
++        val headers = options["headers"].asHostMap()
++        val bodyValue = options["body"]
++        val form = options["form"].asHostMap().takeIf { it.isNotEmpty() }
++        val formData = options["formData"]
++        val binary = options["binary"] as? Boolean ?: (options["binary"]?.toString() == "true")
++        val timeoutMs = (options["timeout"] as? Number)?.toLong()?.coerceIn(1_000L, 60_000L) ?: HTTP_TIMEOUT_MS
++        NPLogger.d(TAG, "http start endpoint=${url.toSafeEndpoint()} method=$method headers=${headers.keys.joinToString(",")} " +
++            "form=${form != null} formData=${formData != null} body=${bodyValue != null} binary=$binary timeoutMs=$timeoutMs")
++
++        val callRef = AtomicReference<okhttp3.Call?>(null)
++        Thread {
++            try {
++                val requestBuilder = Request.Builder().url(url)
++                headers.forEach { (key, value) ->
++                    if (key != null && value != null) requestBuilder.addHeader(key.toString(), value.toString())
++                }
++                if (method != "GET" && method != "HEAD") {
++                    requestBuilder.method(method, requestBody(form, formData, bodyValue, headers))
++                }
++                val call = httpClient.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build()
++                    .newCall(requestBuilder.build())
++                callRef.set(call)
++                call.execute().use { response ->
++                    val parsedBody: Any = if (binary) {
++                        (response.body.bytes().map { it.toInt() and 0xff })
++                    } else {
++                        parseResponseBody(response.body.string())
++                    }
++                    NPLogger.i(
++                        TAG,
++                        "LX HTTP status=${response.code} contentType=${response.header("Content-Type").orEmpty()} " +
++                            "body=${responseShape(parsedBody)}",
++                    )
++                    NPLogger.d(TAG, "http response endpoint=${url.toSafeEndpoint()} code=${response.code} urlAvailable=${responseShape(parsedBody).contains("url")}")
++                    val result = mapOf(
++                        "statusCode" to response.code,
++                        "statusMessage" to response.message,
++                        "headers" to response.headers.toMultimap().mapValues { it.value.joinToString(",") },
++                        "body" to parsedBody,
++                        "url" to response.request.url.toString(),
++                        "ok" to response.isSuccessful,
++                    )
++                    enqueueHttpResponse(HttpResponse(callback, null, result, parsedBody))
++                }
++            } catch (error: Throwable) {
++                NPLogger.w(TAG, "LX HTTP failed error=${error.javaClass.simpleName}: ${error.message.safeLogMessage()}")
++                enqueueHttpResponse(HttpResponse(callback, error.message ?: "request failed", null, null))
++            }
++        }.start()
++        return JSCallFunction {
++            runCatching { callRef.get()?.cancel() }
++            null
++        }
++    }
++
++    /** Builds the request body for `form`, `formData` or a raw `body` payload. */
++    private fun requestBody(
++        form: Map<*, *>?,
++        formData: Any?,
++        bodyValue: Any?,
++        headers: Map<*, *>,
++    ): okhttp3.RequestBody {
++        val declaredContentType = headers.entries
++            .firstOrNull { (key, _) -> key?.toString().equals("content-type", ignoreCase = true) }
++            ?.value?.toString()
++        if (formData != null) {
++            val builder = okhttp3.MultipartBody.Builder().setType(okhttp3.MultipartBody.FORM)
++            var added = false
++            val parts: Iterable<Pair<Any?, Any?>> = when (formData) {
++                is QuickJSObject -> formData.toMap().toList()
++                is Map<*, *> -> formData.toList()
++                is List<*> -> formData.mapIndexed { index, value -> index.toString() to value }
++                else -> emptyList()
++            }
++            parts.forEach { (key, value) ->
++                if (key == null || value == null) return@forEach
++                builder.addFormDataPart(key.toString(), value.toString())
++                added = true
++            }
++            if (added) return builder.build()
++        }
++        if (form != null) {
++            val builder = okhttp3.FormBody.Builder()
++            form.forEach { (key, value) ->
++                if (key != null && value != null) builder.add(key.toString(), value.toString())
++            }
++            return builder.build()
++        }
++        return when (val body = bodyValue) {
++            is String -> body.toRequestBody(
++                (declaredContentType ?: if (body.trimStart().firstOrNull()?.let { it == '{' || it == '[' } == true) {
++                    JSON_MEDIA_TYPE
++                } else {
++                    TEXT_MEDIA_TYPE
++                }).toMediaTypeOrNull(),
++            )
++            is QuickJSObject -> jsonBody(body.toMap())
++            is Map<*, *> -> jsonBody(body)
++            is List<*> -> JSONArray(body).toString().toRequestBody(JSON_MEDIA_TYPE.toMediaTypeOrNull())
++            null -> "".toRequestBody(declaredContentType?.toMediaTypeOrNull())
++            else -> body.toString().toRequestBody(TEXT_MEDIA_TYPE.toMediaTypeOrNull())
++        }
++    }
++
++    private fun jsonBody(value: Map<*, *>): okhttp3.RequestBody =
++        JSONObject(value.toStringKeyedMap()).toString().toRequestBody(JSON_MEDIA_TYPE.toMediaTypeOrNull())
++
++    private fun enqueueHttpResponse(response: HttpResponse) {
++        pendingHttpResponses.add(response)
++        synchronized(drainSignal) { drainSignal.notifyAll() }
++    }
++
++    private fun processPendingHttpResponses() {
++        while (true) {
++            val response = pendingHttpResponses.poll() ?: break
++            if (response.error != null) {
++                response.callback.call(response.error, null, null)
++            } else {
++                val resultObj = response.result?.let { createJsObject(it) }
++                val bodyObj = response.body?.let { toJsValue(it) }
++                response.callback.call(null, resultObj, bodyObj)
++            }
++        }
++    }
++
++    private fun parseResponseBody(body: String): Any = runCatching {
++        when (body.trimStart().firstOrNull()) {
++            '{' -> JSONObject(body).toHostValue().let { value ->
++                // Some LX endpoints wrap the actual payload in `data`, while
++                // older user scripts read `body.url` directly.
++                val nested = value["data"]
++                when {
++                    value["url"] != null -> value
++                    nested is Map<*, *> -> value + nested.entries.associate { it.key.toString() to it.value }
++                    nested is String && nested.startsWith("http") -> value + ("url" to nested)
++                    else -> value
++                }
++            }
++            '[' -> JSONArray(body).toHostValue()
++            else -> body
++        }
++    }.getOrDefault(body)
++
++    /**
++     * Stores what `lx.send('inited', { sources: { kw: { type, actions, qualitys } } })`
++     * announced. Older scripts pass the quality list directly, so both shapes are read.
++     */
++    private fun recordSourceInfo(value: Any?) {
++        val data = when (value) {
++            is QuickJSObject -> value.toMap()
++            is Map<*, *> -> value
++            else -> return
++        }
++        val sourceMap = when (val sources = data["sources"]) {
++            is QuickJSObject -> sources.toMap()
++            is Map<*, *> -> sources
++            else -> return
++        }
++        sourceMap.forEach { (name, rawInfo) ->
++            val source = name?.toString() ?: return@forEach
++            val rawMap = when (rawInfo) {
++                is QuickJSObject -> runCatching { rawInfo.toMap() }.getOrNull()
++                is Map<*, *> -> rawInfo
++                else -> null
++            }
++            val actions = rawMap?.let { stringList(it["actions"]) }.orEmpty()
++            val qualitys = rawMap?.let { stringList(it["qualitys"]) }.orEmpty()
++                .ifEmpty { stringList(rawInfo) }
++            sourceCapabilities[source] = LxUserSourceCapability(actions = actions, qualitys = qualitys)
++            if (qualitys.isNotEmpty()) sourceQualities[source] = qualitys
++        }
++    }
++
++    private fun stringList(value: Any?): List<String> = when (value) {
++        is QuickJSObject -> value.toArray().mapNotNull { it?.toString() }
++        is List<*> -> value.mapNotNull { it?.toString() }
++        else -> emptyList()
++    }
++
++    private fun settle(value: Any?, onSuccess: (Any?) -> Unit, onError: (Throwable) -> Unit) {
++        if (value !is QuickJSObject) {
++            onSuccess(value)
++            return
++        }
++        val then = runCatching { value.getJSFunctionProperty("then") }.getOrNull()
++        if (then == null) {
++            onSuccess(value)
++            return
++        }
++        val resolve = JSCallFunction { args ->
++            settle(args.firstOrNull(), onSuccess, onError)
++            null
++        }
++        val reject = JSCallFunction { args ->
++            onError(IllegalStateException(args.firstOrNull()?.toString() ?: "LX promise rejected"))
++            null
++        }
++        runCatching { then.call(resolve, reject) }.onFailure { onSuccess(value) }
++    }
++
++    /**
++     * Pumps JS timers and HTTP replies until the action settles or [timeoutMs] passes.
++     *
++     * The sources usually call a telemetry endpoint before their real request, and
++     * that first call alone can take two seconds. This used to stop after a fixed
++     * number of iterations - roughly two seconds - which discarded answers that
++     * arrived moments later and made songs fall back to the official trial clip.
++     */
++    private fun drainUntil(done: CountDownLatch, timeoutMs: Long) {
++        val deadline = System.currentTimeMillis() + timeoutMs
++        while (done.count != 0L && System.currentTimeMillis() < deadline) {
++            dispatchTimers()
++            processPendingHttpResponses()
++            runCatching { context.evaluate("void 0") }
++            if (done.count == 0L) return
++            synchronized(drainSignal) {
++                if (done.count == 0L || pendingHttpResponses.isNotEmpty()) return@synchronized
++                // Wake early when a reply lands so a finished action does not wait
++                // out the rest of the slot.
++                drainSignal.wait(10)
++            }
++        }
++    }
++
++    private fun drainScriptInitialization() {
++        repeat(600) { iteration ->
++            dispatchTimers()
++            processPendingHttpResponses()
++            runCatching { context.evaluate("void 0") }
++            if (requestHandlers.isNotEmpty()) return
++            synchronized(drainSignal) {
++                if (requestHandlers.isEmpty() && pendingHttpResponses.isEmpty()) drainSignal.wait(5)
++            }
++            if (iteration >= 20 && pendingHttpResponses.isEmpty() && timers.isEmpty()) Thread.sleep(5)
++        }
++    }
++
++    private fun dispatchTimers() {
++        val now = System.currentTimeMillis()
++        val ready = timers.filterValues { (deadline) -> deadline <= now }.keys.toList()
++        ready.forEach { id -> timers.remove(id)?.second?.call() }
++    }
++
++    /** Converts Kotlin maps/lists into QuickJS objects by round-tripping through JSON. */
++    private fun createJsObject(data: Map<String, Any?>): QuickJSObject {
++        val json = jsonValueToJson(data)
++        return context.evaluate("($json)") as QuickJSObject
++    }
++
++    private fun createJsArray(data: List<Any?>): QuickJSObject {
++        val json = jsonValueToJson(data)
++        return context.evaluate("($json)") as QuickJSObject
++    }
++
++    private fun jsonValueToJson(value: Any?): String = when (value) {
++        null -> "null"
++        is String -> JSONObject.quote(value)
++        is Number, is Boolean -> value.toString()
++        is Map<*, *> -> {
++            "{" + value.entries.joinToString(",") { (k, v) ->
++                "${JSONObject.quote(k.toString())}:${jsonValueToJson(v)}"
++            } + "}"
++        }
++        is List<*> -> {
++            "[" + value.joinToString(",") { jsonValueToJson(it) } + "]"
++        }
++        else -> JSONObject.quote(value.toString())
++    }
++
++    private fun Any?.asHostMap(): Map<*, *> = when (this) {
++        is QuickJSObject -> this.toMap()
++        is Map<*, *> -> this
++        else -> emptyMap<Any?, Any?>()
++    }
++
++    private fun responseShape(value: Any?): String = when (value) {
++        is Map<*, *> -> {
++            val keys = value.keys.joinToString(",") { it.toString() }.take(120)
++            val code = value["code"]?.toString()?.take(32)
++            val message = value["msg"]?.toString()?.safeLogMessage()?.take(80)
++            "object:$keys" + if (code != null || message != null) " code=$code msg=$message" else ""
++        }
++        is List<*> -> "array:${value.size}"
++        is String -> "text:${value.length}"
++        null -> "null"
++        else -> value.javaClass.simpleName
++    }
++
++    @Suppress("UNCHECKED_CAST")
++    private fun Map<*, *>.toStringKeyedMap(): Map<String, Any?> =
++        entries.associate { (key, value) -> key.toString() to value }
++
++    private fun toJsValue(value: Any?): Any? = when (value) {
++        is Map<*, *> -> createJsObject(value as Map<String, Any?>)
++        is List<*> -> createJsArray(value)
++        else -> value
++    }
++
++    private fun urlFrom(value: Any?): String? = when (value) {
++        is String -> value.takeIf(String::isNotBlank)
++        is QuickJSObject -> urlFrom(value.toMap())
++        is Map<*, *> -> {
++            val direct = value["url"]?.toString()
++            if (!direct.isNullOrBlank() && (direct.startsWith("http://") || direct.startsWith("https://"))) return direct
++            val nested = (value["data"] as? Map<*, *>)?.get("url")?.toString()
++            if (!nested.isNullOrBlank() && (nested.startsWith("http://") || nested.startsWith("https://"))) return nested
++            null
++        }
++        else -> null
++    }
++
++    private fun bytes(value: Any?, encoding: String? = null): ByteArray = when (value) {
++        is ByteArray -> value
++        is QuickJSObject -> value.toArray().mapNotNull { (it as? Number)?.toByte() }.toByteArray()
++        is List<*> -> value.mapNotNull { (it as? Number)?.toByte() }.toByteArray()
++        is String -> when (encoding?.lowercase()) {
++            "base64" -> Base64.getDecoder().decode(value)
++            "hex" -> value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
++            else -> value.toByteArray(Charsets.UTF_8)
++        }
++        else -> ByteArray(0)
++    }
++
++    override fun close() {
++        if (closed.compareAndSet(false, true)) {
++            context.close()
++        }
++    }
++
++    private companion object {
++        val QUALITY_ORDER = listOf("128k", "320k", "flac", "flac24bit")
++        fun createContext(): QuickJSContext {
++            QuickJSLoader.init()
++            return QuickJSContext.create()
++        }
++    }
++}
++
++private const val TAG = "NERI-LxRuntime"
++
++private fun String.toSafeEndpoint(): String = runCatching {
++    val uri = android.net.Uri.parse(this)
++    buildString {
++        append(uri.scheme.orEmpty())
++        append("://")
++        append(uri.host.orEmpty())
++        append(uri.path.orEmpty())
++        if (!uri.query.isNullOrBlank()) append("?<redacted>")
++    }
++}.getOrDefault("<invalid-url>")
++
++private fun String?.safeLogMessage(): String = this.orEmpty()
++    .replace(Regex("https?://\\S+"), "<url>")
++    .replace(Regex("(?i)(apikey|api_key|token|key)=([^&\\s]+)"), "$1=<redacted>")
++    .replace('\n', ' ')
++    .take(240)
++
++/** Matches the characters JavaScript `encodeURIComponent` leaves untouched. */
++private fun encodeUriComponent(value: String): String {
++    val hex = "0123456789ABCDEF"
++    return buildString(value.length) {
++        for (byte in value.toByteArray(Charsets.UTF_8)) {
++            val code = byte.toInt() and 0xff
++            val char = code.toChar()
++            if (char in UnreservedCharacters) {
++                append(char)
++            } else {
++                append('%').append(hex[code shr 4]).append(hex[code and 0xf])
++            }
++        }
++    }
++}
++
++private const val UnreservedCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
++
++private fun JSONObject.toHostValue(): Map<String, Any?> = keys().asSequence().associateWith { key ->
++    jsonValue(opt(key))
++}
++
++private fun JSONArray.toHostValue(): List<Any?> = (0 until length()).map { index ->
++    jsonValue(opt(index))
++}
++
++private fun jsonValue(value: Any?): Any? = when (value) {
++    JSONObject.NULL -> null
++    is JSONObject -> value.toHostValue()
++    is JSONArray -> value.toHostValue()
++    else -> value
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntimeSession.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntimeSession.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserRuntimeSession.kt
+@@ -0,0 +1,131 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import java.util.concurrent.CompletableFuture
++import java.util.concurrent.ExecutionException
++import java.util.concurrent.PriorityBlockingQueue
++import java.util.concurrent.ThreadPoolExecutor
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicLong
++
++/**
++ * Keeps one LX runtime alive across songs.
++ *
++ * Building a runtime means compiling the user's script - measured at ~200 ms for a
++ * 145 KB obfuscated source - and discarding whatever cache the script had built up.
++ * Keeping it alive skips that work and lets the source reuse its own cached
++ * lookups, which most public sources keep for around twenty minutes.
++ *
++ * A QuickJS context may only be touched from the thread that created it, so every
++ * call is funnelled through one dedicated thread. Resolves are serialised by the
++ * caller anyway, so this costs no parallelism; it just pins the context to a
++ * stable thread. The caller's own wall-clock budget still bounds each song, and a
++ * failed action discards the context so the next song starts clean.
++ *
++ * Work is queued by priority. The prefetcher resolves several upcoming tracks at
++ * once, and each of those takes seconds; without priority the track the user just
++ * tapped would sit behind them.
++ */
++internal object LxUserRuntimeSession {
++    private class Task(
++        val urgent: Boolean,
++        val sequence: Long,
++        val body: () -> Unit,
++    ) : Runnable, Comparable<Task> {
++        override fun run() = body()
++
++        override fun compareTo(other: Task): Int = when {
++            urgent != other.urgent -> if (urgent) -1 else 1
++            else -> sequence.compareTo(other.sequence)
++        }
++    }
++
++    private val sequence = AtomicLong()
++
++    private val executor = ThreadPoolExecutor(
++        1,
++        1,
++        0L,
++        TimeUnit.MILLISECONDS,
++        PriorityBlockingQueue(),
++    ) { runnable -> Thread(runnable, "lx-user-runtime").apply { isDaemon = true } }
++
++    // Only ever touched on the executor's thread, so no extra locking is needed.
++    private var runtime: LxUserRuntime? = null
++    private var identity: String? = null
++
++    private val pacingLock = Any()
++    private var nextRequestAt = 0L
++
++    /**
++     * Blocks until this caller is allowed to issue the next request to the source.
++     *
++     * The quota is shared by every concurrent resolve. Pacing each resolve on its own
++     * multiplied the intended gap by the prefetcher's four parallel resolves, and the
++     * public mirrors answered `429 请求过于频繁` - which made songs fall back to the
++     * official 30 s trial clip.
++     */
++    fun awaitRequestSlot(gapMs: Long) {
++        val waitMs = synchronized(pacingLock) {
++            val now = android.os.SystemClock.elapsedRealtime()
++            val slot = if (nextRequestAt > now) nextRequestAt else now
++            nextRequestAt = slot + gapMs
++            slot - now
++        }
++        if (waitMs > 0L) Thread.sleep(waitMs)
++    }
++
++    /**
++     * Runs [block] against the shared runtime. Pass `urgent = false` for background
++     * work such as prefetching so a user-initiated resolve is served first.
++     */
++    fun <T> withRuntime(
++        recordId: String,
++        scriptSource: String,
++        urgent: Boolean = true,
++        block: (LxUserRuntime) -> T,
++    ): T {
++        val result = CompletableFuture<T>()
++        executor.execute(
++            Task(urgent, sequence.incrementAndGet()) {
++                try {
++                    result.complete(block(runtimeFor(recordId, scriptSource)))
++                } catch (error: Throwable) {
++                    result.completeExceptionally(error)
++                }
++            },
++        )
++        return try {
++            result.get()
++        } catch (error: ExecutionException) {
++            // An action that threw may have left the context mid-flight. Drop it on
++            // the owning thread so the next song rebuilds from a known-good state.
++            executor.execute(
++                Task(true, sequence.incrementAndGet()) {
++                    runCatching { runtime?.close() }
++                    runtime = null
++                    identity = null
++                },
++            )
++            throw error.cause ?: error
++        }
++    }
++
++    private fun runtimeFor(recordId: String, scriptSource: String): LxUserRuntime {
++        runtime?.let { existing ->
++            if (identity == recordId) return existing
++        }
++        runCatching { runtime?.close() }
++        runtime = null
++        identity = null
++        val candidate = LxUserRuntime()
++        try {
++            candidate.load(LxUserScript(scriptSource))
++        } catch (error: Throwable) {
++            runCatching { candidate.close() }
++            throw error
++        }
++        runtime = candidate
++        identity = recordId
++        return candidate
++    }
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserScriptMetadata.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserScriptMetadata.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserScriptMetadata.kt
+@@ -0,0 +1,28 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++/** Metadata shared by LX Music user-source importers. */
++data class LxUserScriptMetadata(
++    val name: String? = null,
++    val version: String? = null,
++    val author: String? = null,
++    val description: String? = null,
++    val homepage: String? = null,
++    val raw: Map<String, String> = emptyMap(),
++) {
++    companion object {
++        private val field = Regex("^\\s*[^\\w@]*@([A-Za-z][\\w-]*)\\s+(.+?)\\s*$")
++
++        /** Reads @name-style fields from the leading comment block only. */
++        fun parse(script: String): LxUserScriptMetadata {
++            val values = linkedMapOf<String, String>()
++            for (line in script.lineSequence().take(80)) {
++                val match = field.find(line) ?: continue
++                values[match.groupValues[1].lowercase()] = match.groupValues[2].trim()
++            }
++            return LxUserScriptMetadata(
++                values["name"], values["version"], values["author"],
++                values["description"], values["homepage"], values.toMap(),
++            )
++        }
++    }
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserSourceStore.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserSourceStore.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserSourceStore.kt
+@@ -0,0 +1,101 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import android.content.Context
++import java.io.File
++import org.json.JSONArray
++import org.json.JSONObject
++
++/** Stores LX user-source metadata separately from the executable script body. */
++object LxUserSourceStore {
++    private const val PreferencesName = "neri_lx_user_sources"
++    private const val KeyList = "list"
++    private const val MaxSources = 20
++    private const val MaxScriptBytes = 9_000_000L
++
++    fun list(context: Context): List<LxUserSourceRecord> {
++        val raw = context.applicationContext
++            .getSharedPreferences(PreferencesName, Context.MODE_PRIVATE)
++            .getString(KeyList, null) ?: return emptyList()
++        val json = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
++        return buildList {
++            for (index in 0 until json.length()) {
++                val item = json.optJSONObject(index) ?: continue
++                val id = item.optString("id")
++                if (id.isBlank()) continue
++                add(
++                    LxUserSourceRecord(
++                        id = id,
++                        metadata = LxUserScriptMetadata(
++                            name = item.optString("name").takeIf(String::isNotBlank),
++                            version = item.optString("version").takeIf(String::isNotBlank),
++                            author = item.optString("author").takeIf(String::isNotBlank),
++                            description = item.optString("description").takeIf(String::isNotBlank),
++                            homepage = item.optString("homepage").takeIf(String::isNotBlank),
++                        ),
++                    ),
++                )
++            }
++        }
++    }
++
++    fun import(context: Context, script: String): LxUserSourceRecord {
++        val normalizedScript = script.removePrefix("\uFEFF")
++        require(normalizedScript.toByteArray(Charsets.UTF_8).size <= MaxScriptBytes) { "音乐源脚本过大（最大 9 MB）" }
++        require(looksLikeLxMusicSource(normalizedScript)) { "不是有效的 LX Music 音乐源脚本" }
++        val metadata = LxUserScriptMetadata.parse(normalizedScript)
++        val id = "user_api_${System.currentTimeMillis()}_${(100..999).random()}"
++        val record = LxUserSourceRecord(id, metadata)
++        val app = context.applicationContext
++        val dir = File(app.filesDir, "lx-user-sources").apply { mkdirs() }
++        File(dir, "$id.js").writeText(normalizedScript, Charsets.UTF_8)
++        val records = (list(app) + record).takeLast(MaxSources)
++        saveList(app, records)
++        return record
++    }
++
++    fun script(context: Context, id: String): String? =
++        File(File(context.applicationContext.filesDir, "lx-user-sources"), "$id.js")
++            .takeIf(File::isFile)?.readText(Charsets.UTF_8)
++
++    fun remove(context: Context, id: String) {
++        val app = context.applicationContext
++        File(File(app.filesDir, "lx-user-sources"), "$id.js").delete()
++        saveList(app, list(app).filterNot { it.id == id })
++    }
++
++    private fun saveList(context: Context, records: List<LxUserSourceRecord>) {
++        val json = JSONArray().apply {
++            records.forEach { record ->
++                put(JSONObject().apply {
++                    put("id", record.id)
++                    put("name", record.metadata.name.orEmpty())
++                    put("version", record.metadata.version.orEmpty())
++                    put("author", record.metadata.author.orEmpty())
++                    put("description", record.metadata.description.orEmpty())
++                    put("homepage", record.metadata.homepage.orEmpty())
++                })
++            }
++        }
++        context.getSharedPreferences(PreferencesName, Context.MODE_PRIVATE)
++            .edit().putString(KeyList, json.toString()).apply()
++    }
++
++    /** LX v5 sources are often obfuscated and encode public names as Unicode escapes. */
++    internal fun looksLikeLxMusicSource(script: String): Boolean {
++        val decoded = EscapedUnicode.replace(script) { match ->
++            match.groupValues[1].toInt(16).toChar().toString()
++        }
++        val hasMetadata = decoded.contains("@name") && decoded.contains("@version")
++        val hasRuntimeMarker = decoded.contains("globalThis") && (
++            decoded.contains("lx") || decoded.contains("musicUrl") || decoded.contains("apiUrl")
++        )
++        return hasMetadata && hasRuntimeMarker
++    }
++
++    private val EscapedUnicode = Regex("\\\\u([0-9a-fA-F]{4})")
++}
++
++data class LxUserSourceRecord(
++    val id: String,
++    val metadata: LxUserScriptMetadata,
++)
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserQuality.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserQuality.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserQuality.kt
+@@ -0,0 +1,111 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import java.util.Locale
++
++/**
++ * How good a stream actually is, in four coarse buckets:
++ *
++ * 1 = 128k-ish, 2 = 320k-ish, 3 = lossless (16-bit), 4 = hi-res (24-bit or better).
++ *
++ * A bucket of `-1` means "no idea", which callers treat as acceptable so an
++ * unknown-but-playable link is never thrown away.
++ *
++ * NeriPlayer's own quality keys are Netease's (`standard` / `higher` / `exhigh` /
++ * `lossless` / `hires` / `jyeffect` / `sky` / `jymaster`). Every LX source is a
++ * Netease substitute, so the measured bucket is reported back through those keys.
++ */
++internal const val LX_RANK_UNKNOWN = -1
++internal const val LX_RANK_STANDARD = 1
++internal const val LX_RANK_HIGH = 2
++internal const val LX_RANK_LOSSLESS = 3
++internal const val LX_RANK_HIRES = 4
++
++/** The quality key the player should show for a measured bucket. */
++internal fun lxRankToQualityKey(rank: Int): String? = when (rank) {
++    LX_RANK_STANDARD -> "standard"
++    LX_RANK_HIGH -> "exhigh"
++    LX_RANK_LOSSLESS -> "lossless"
++    LX_RANK_HIRES -> "hires"
++    else -> null
++}
++
++/** The bucket a requested quality key is asking for. */
++internal fun lxRankForQualityKey(qualityKey: String): Int =
++    when (qualityKey.trim().lowercase(Locale.ROOT)) {
++        "standard", "higher" -> LX_RANK_STANDARD
++        "exhigh" -> LX_RANK_HIGH
++        "lossless" -> LX_RANK_LOSSLESS
++        "hires", "jyeffect", "sky", "jymaster" -> LX_RANK_HIRES
++        else -> LX_RANK_HIRES
++    }
++
++/** The LX quality string to ask a source for, given a NeriPlayer quality key. */
++internal fun lxQualityForQualityKey(qualityKey: String): String =
++    when (lxRankForQualityKey(qualityKey)) {
++        LX_RANK_STANDARD -> "128k"
++        LX_RANK_HIGH -> "320k"
++        LX_RANK_LOSSLESS -> "flac"
++        else -> "flac24bit"
++    }
++
++/**
++ * Tiers to try, from the requested one downwards.
++ *
++ * Public mirrors routinely accept a high tier and quietly serve something lower,
++ * so a miss at one tier is worth retrying one step down before giving up.
++ */
++internal fun lxQualityFallbacks(requestedQuality: String): List<String> = when (requestedQuality) {
++    "flac24bit" -> listOf("flac24bit", "flac", "320k", "128k")
++    "flac" -> listOf("flac", "320k", "128k")
++    "320k" -> listOf("320k", "128k")
++    else -> listOf(requestedQuality)
++}
++
++/** Coarse bucket for whatever a source claims about its own answer, or a bitrate. */
++internal fun lxQualityRank(raw: String?): Int {
++    val value = raw?.lowercase(Locale.ROOT) ?: return LX_RANK_UNKNOWN
++    if (value.isEmpty() || value == "null" || value == "undefined") return LX_RANK_UNKNOWN
++    if (value.all(Char::isDigit)) {
++        // Scripts that do report a number use bits per second (`br`), not kbps.
++        val bitrate = value.toLongOrNull() ?: return LX_RANK_UNKNOWN
++        return when {
++            bitrate < 200_000L -> LX_RANK_STANDARD
++            bitrate < 500_000L -> LX_RANK_HIGH
++            bitrate < 1_000_000L -> LX_RANK_LOSSLESS
++            else -> LX_RANK_HIRES
++        }
++    }
++    return when (value) {
++        "128k", "128", "standard", "l", "pq" -> LX_RANK_STANDARD
++        "320k", "320", "exhigh", "high", "h", "hq" -> LX_RANK_HIGH
++        "flac", "lossless", "sq", "999", "999k" -> LX_RANK_LOSSLESS
++        "flac24bit", "hires", "hi-res", "hr", "atmos", "atmos_plus",
++        "master", "sky", "jyeffect", "jymaster", "zq", "super",
++        -> LX_RANK_HIRES
++        else -> LX_RANK_UNKNOWN
++    }
++}
++
++/** Bucket for a measured bitrate in kbps. */
++internal fun lxRankForBitrateKbps(bitrateKbps: Long): Int = when {
++    bitrateKbps <= 0L -> LX_RANK_UNKNOWN
++    bitrateKbps < 200L -> LX_RANK_STANDARD
++    bitrateKbps < 500L -> LX_RANK_HIGH
++    bitrateKbps < 1_000L -> LX_RANK_LOSSLESS
++    else -> LX_RANK_HIRES
++}
++
++/** Maps a resolved URL's extension onto a MIME type, for the player and the cache. */
++internal fun lxMimeTypeForUrl(url: String): String? {
++    val path = url.substringBefore('?').substringBefore('#').lowercase(Locale.ROOT)
++    val extension = path.substringAfterLast('.', "")
++    return when (extension) {
++        "flac" -> "audio/flac"
++        "mp3" -> "audio/mpeg"
++        "m4a", "mp4" -> "audio/mp4"
++        "ogg", "oga" -> "audio/ogg"
++        "aac" -> "audio/aac"
++        "wav" -> "audio/wav"
++        else -> null
++    }
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserPlaybackResolver.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserPlaybackResolver.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/LxUserPlaybackResolver.kt
+@@ -0,0 +1,328 @@
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import android.content.Context
++import android.os.SystemClock
++import java.net.HttpURLConnection
++import java.net.URL
++import java.util.Locale
++import moe.ouom.neriplayer.core.logging.NPLogger
++import moe.ouom.neriplayer.data.model.SongItem
++
++private const val TAG = "NERI-LxSource"
++
++/** A playable link produced by an LX user source. */
++internal data class LxUserResolvedSource(
++    val scriptId: String,
++    val url: String,
++    /** NeriPlayer quality key for the measured bucket, or null when unmeasurable. */
++    val qualityKey: String?,
++    val rank: Int,
++    val bitrateKbps: Int?,
++    val contentLength: Long?,
++    val mimeType: String?,
++)
++
++private data class LxProbeResult(
++    val rank: Int,
++    val totalBytes: Long?,
++    val bitrateKbps: Int?,
++)
++
++/**
++ * Resolves a Netease song through the LX Music user sources the user imported.
++ *
++ * The shape of the search follows the lessons learned on the MeloX port:
++ *
++ * - Tiers loop outside, sources inside, so a better tier at a slower platform beats
++ *   a worse tier at a faster one.
++ * - The tier a source was *asked* for proves nothing about the file it returns, so a
++ *   resolved link is measured (one ranged GET against the CDN) before being accepted.
++ * - Every source but `wy` is matched by name, so `wy` - the only one that can be
++ *   matched by Netease song id - goes first, and its lossless answer is taken
++ *   immediately rather than spending seconds hunting a 24-bit version elsewhere.
++ * - Kuwo is absent on purpose: its endpoint answers with 22-60 kbps fragments.
++ */
++internal class LxUserPlaybackResolver(
++    context: Context,
++) {
++    private val appContext = context.applicationContext
++
++    /** Cheap check so callers can skip the whole stage when nothing is imported. */
++    fun hasSources(): Boolean = LxUserSourceStore.list(appContext).isNotEmpty()
++
++    /**
++     * @param hasPlayableFallback true when the caller already holds a complete stream
++     *   it can fall back to. Hunting for a better tier is then a bonus, so the search
++     *   gets a short leash; when the only alternative is a 30 s trial clip it is worth
++     *   waiting much longer.
++     * @param urgent false for background work such as prefetching, so a track the user
++     *   actually tapped is not queued behind upcoming ones.
++     */
++    fun resolve(
++        song: SongItem,
++        requestedQualityKey: String,
++        hasPlayableFallback: Boolean,
++        urgent: Boolean = true,
++    ): LxUserResolvedSource? {
++        val title = (song.originalName ?: song.name).trim()
++        val artist = (song.originalArtist ?: song.artist).trim()
++        if (title.isBlank() || artist.isBlank()) return null
++
++        val requestedQuality = lxQualityForQualityKey(requestedQualityKey)
++        // `wy` can be matched by Netease song id, which is by far the most reliable
++        // route; the rest are name searches and only help when the id lookup fails.
++        val candidateSources = LX_SOURCES
++
++        NPLogger.i(TAG, "resolve start songId=${song.id} quality=$requestedQuality title=${title.take(40)} artist=${artist.take(40)}")
++
++        for (record in LxUserSourceStore.list(appContext)) {
++            val script = LxUserSourceStore.script(appContext, record.id) ?: continue
++            var phase = "load"
++            val result: LxUserResolvedSource? = runCatching {
++                LxUserRuntimeSession.withRuntime(record.id, script, urgent) { runtime ->
++                    phase = "request"
++                    val start = SystemClock.elapsedRealtime()
++                    val deadline = start + if (hasPlayableFallback) {
++                        RESOLVE_BUDGET_WITH_FALLBACK_MS
++                    } else {
++                        RESOLVE_BUDGET_MS
++                    }
++                    var best: LxUserResolvedSource? = null
++                    var bestRank = LX_RANK_UNKNOWN
++                    var probes = 0
++                    // A source that already handed back a link has shown us its best;
++                    // asking again one tier lower almost always returns the same file.
++                    val answered = mutableSetOf<String>()
++
++                    for (requestedTier in lxQualityFallbacks(requestedQuality)) {
++                        val need = lxQualityRank(requestedTier)
++                        for (source in candidateSources) {
++                            if (source in answered) continue
++                            if (!runtime.supports(source, "musicUrl")) continue
++                            // Once something playable is in hand, stop hunting much
++                            // sooner: the user is waiting on a song, not on a tier.
++                            val softDeadline = if (best == null) deadline else start + FALLBACK_BUDGET_MS
++                            if (SystemClock.elapsedRealtime() > softDeadline) {
++                                NPLogger.w(TAG, "budget exhausted script=${record.id} tier=$requestedTier source=$source best=$bestRank")
++                                return@withRuntime best
++                            }
++                            LxUserRuntimeSession.awaitRequestSlot(MIN_REQUEST_GAP_MS)
++                            val sourceQuality = runtime.qualityFor(source, requestedTier)
++                            val musicInfo = buildMusicInfo(song, source, requestedTier)
++                            // Give the action whatever is left of this song's budget
++                            // rather than a fixed slice: a source that answers slowly
++                            // still gets its answer in, but may not overshoot the time
++                            // the user is willing to wait.
++                            val actionBudget = (softDeadline - SystemClock.elapsedRealtime())
++                                .coerceAtLeast(MIN_ACTION_TIMEOUT_MS)
++                            NPLogger.d(TAG, "candidate script=${record.id} source=$source requested=$requestedTier actual=$sourceQuality")
++
++                            val value = runCatching {
++                                runtime.callAction(
++                                    "musicUrl",
++                                    musicInfo + mapOf(
++                                        "source" to source,
++                                        "type" to sourceQuality,
++                                        "musicInfo" to musicInfo,
++                                    ),
++                                    actionBudget,
++                                )
++                            }.onFailure {
++                                NPLogger.w(TAG, "candidate failed script=${record.id} source=$source quality=$sourceQuality", it)
++                            }.getOrNull()
++
++                            val url = when (value) {
++                                is String -> value
++                                is Map<*, *> -> value["url"]?.toString()
++                                else -> null
++                            }?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
++                            // Most scripts hand back the raw API body, so the tier that
++                            // actually came back is usually one of these fields.
++                            val reported = (value as? Map<*, *>)?.let { body ->
++                                sequenceOf("quality", "type", "level", "br", "bitrate")
++                                    .mapNotNull { body[it]?.toString()?.trim()?.takeIf(String::isNotEmpty) }
++                                    .firstOrNull()
++                            }
++
++                            var contentLength: Long? = null
++                            var bitrateKbps: Int? = null
++                            val reportedRank = lxQualityRank(reported)
++                            val rank = if (url == null) {
++                                LX_RANK_UNKNOWN
++                            } else if (reportedRank >= 0) {
++                                reportedRank
++                            } else if (song.durationMs > 0L && probes < MAX_PROBES) {
++                                // The scripts never report a tier, so measure the real
++                                // one: a single ranged GET against the final CDN (not the
++                                // rate-limited LX API) yields the total size, and the
++                                // track duration turns that into a bitrate.
++                                probes++
++                                probeQuality(url, song.durationMs).also { probe ->
++                                    contentLength = probe.totalBytes
++                                    bitrateKbps = probe.bitrateKbps
++                                }.rank
++                            } else {
++                                LX_RANK_UNKNOWN
++                            }
++                            NPLogger.d(
++                                TAG,
++                                "candidate result script=${record.id} source=$source quality=$sourceQuality " +
++                                    "reported=$reported rank=$rank need=$need link=${url != null} bytes=$contentLength bitrateKbps=$bitrateKbps",
++                            )
++                            if (url == null) continue
++                            answered += source
++                            val resolved = LxUserResolvedSource(
++                                scriptId = record.id,
++                                url = url,
++                                qualityKey = lxRankToQualityKey(rank),
++                                rank = rank,
++                                bitrateKbps = bitrateKbps,
++                                contentLength = contentLength,
++                                mimeType = lxMimeTypeForUrl(url),
++                            )
++                            // Only accept a link that is at least as good as the tier
++                            // being tried, but keep the best miss around in case nothing
++                            // reaches the bar. Lossless from `wy` is taken straight away:
++                            // these mirrors rarely hold a 24-bit master of a track the
++                            // official API only serves as a clip.
++                            if (rank < 0 || rank >= need || (source == "wy" && rank >= LX_RANK_LOSSLESS)) {
++                                return@withRuntime resolved
++                            }
++                            if (rank > bestRank) {
++                                bestRank = rank
++                                best = resolved
++                            }
++                        }
++                    }
++                    best
++                }
++            }.onFailure { error ->
++                NPLogger.w(TAG, "failed script=${record.id} phase=$phase songId=${song.id}", error)
++            }.getOrNull()
++
++            if (result != null) {
++                NPLogger.i(TAG, "resolved songId=${song.id} script=${result.scriptId} quality=${result.qualityKey} bitrateKbps=${result.bitrateKbps}")
++                return result
++            }
++            NPLogger.w(TAG, "exhausted songId=${song.id} script=${record.id}")
++        }
++
++        NPLogger.w(TAG, "unresolved songId=${song.id} sources=${LxUserSourceStore.list(appContext).size}")
++        return null
++    }
++
++    /**
++     * Asks the CDN for its total size with a `Range: bytes=0-0` GET, which returns the
++     * full length in `Content-Range` without downloading the audio, and divides by the
++     * track duration. Returns an unknown rank when the size cannot be determined.
++     */
++    private fun probeQuality(url: String, durationMs: Long): LxProbeResult {
++        try {
++            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
++                requestMethod = "GET"
++                setRequestProperty("Range", "bytes=0-0")
++                connectTimeout = PROBE_TIMEOUT_MS
++                readTimeout = PROBE_TIMEOUT_MS
++                instanceFollowRedirects = true
++            }
++            connection.connect()
++            val total = run {
++                val contentRange = connection.getHeaderField("Content-Range")
++                if (!contentRange.isNullOrBlank() && contentRange.contains('/')) {
++                    contentRange.substring(contentRange.lastIndexOf('/') + 1).toLongOrNull()
++                } else {
++                    connection.contentLengthLong.takeIf { it > 0L }
++                }
++            }
++            connection.disconnect()
++            if (total == null || total <= 0L) return LxProbeResult(LX_RANK_UNKNOWN, null, null)
++            val seconds = (durationMs.coerceAtLeast(1L) / 1000L).coerceAtLeast(1L)
++            val bitrateKbps = ((total * 8L) / seconds / 1000L).toInt()
++            NPLogger.d(TAG, "probe total=$total bitrateKbps=$bitrateKbps rank=${lxRankForBitrateKbps(bitrateKbps.toLong())}")
++            return LxProbeResult(lxRankForBitrateKbps(bitrateKbps.toLong()), total, bitrateKbps)
++        } catch (error: Throwable) {
++            NPLogger.d(TAG, "probe failed: ${error.javaClass.simpleName}")
++            return LxProbeResult(LX_RANK_UNKNOWN, null, null)
++        }
++    }
++
++    private companion object {
++        /**
++         * Sources to try, in order, for a Netease song. `wy` first because it is the
++         * only one that can be matched by Netease song id; Kuwo is deliberately absent
++         * because its endpoint answers with 22-60 kbps fragments.
++         */
++        val LX_SOURCES = listOf("wy", "kg", "tx", "mg")
++
++        /**
++         * Cap while the only alternative is the official trial clip. A source costs
++         * 1-4 s because the scripts call a telemetry endpoint before their real
++         * request, so this has to cover a couple of attempts. Giving up early here
++         * leaves the user on a 30 s clip, which is worth waiting to avoid.
++         */
++        const val RESOLVE_BUDGET_MS = 10_000L
++        /**
++         * Cap when the caller already holds a complete stream. Chasing a higher tier is
++         * then a bonus, and the user should not wait long for it.
++         */
++        const val RESOLVE_BUDGET_WITH_FALLBACK_MS = 3_000L
++        /** Shorter cap once a third-party link exists and we are only chasing a better tier. */
++        const val FALLBACK_BUDGET_MS = 3_000L
++        /**
++         * Pause between actions. Each action fires two to three upstream requests of
++         * its own, so the sources' own "no more than 4 requests per 2 s" rule needs a
++         * wider gap than the action count suggests; at 400 ms the mirror answered
++         * `429 请求过于频繁` and the affected songs fell back to the trial clip.
++         */
++        const val MIN_REQUEST_GAP_MS = 800L
++        /** Floor for one action so a nearly exhausted budget still lets a request finish. */
++        const val MIN_ACTION_TIMEOUT_MS = 1_500L
++        /** At most this many CDN probes per resolve; each one is a single ranged GET. */
++        const val MAX_PROBES = 4
++        /** Give up on a probe after this long so a slow CDN cannot stall the shared thread. */
++        const val PROBE_TIMEOUT_MS = 2000
++    }
++}
++
++/**
++ * The `musicInfo` shape LX user sources expect. Scripts read both the flat fields and
++ * the nested `meta`, so both are filled in; `source` and `quality` describe the source
++ * and tier currently being tried, otherwise the script keeps asking for the top tier
++ * and the fallbacks never happen.
++ */
++private fun buildMusicInfo(song: SongItem, source: String, quality: String): Map<String, Any?> {
++    val title = (song.originalName ?: song.name).trim()
++    val artist = (song.originalArtist ?: song.artist).trim()
++    val songId = song.id.toString()
++    val durationSeconds = song.durationMs.takeIf { it > 0L }?.div(1_000L)
++    val interval = durationSeconds?.let { seconds ->
++        String.format(Locale.ROOT, "%02d:%02d", seconds / 60L, seconds % 60L)
++    }
++    val meta = mapOf(
++        "songId" to songId,
++        "albumId" to song.albumId.toString(),
++        "albumName" to song.album,
++        "qualitys" to listOf(quality),
++        "_qualitys" to emptyMap<String, Any?>(),
++        "picUrl" to song.coverUrl.orEmpty(),
++    )
++    return mapOf(
++        "id" to songId,
++        "songId" to songId,
++        "songmid" to songId,
++        "mid" to songId,
++        "hash" to songId,
++        "name" to title,
++        "title" to title,
++        "singer" to artist,
++        "artist" to artist,
++        "source" to source,
++        "interval" to interval,
++        "duration" to durationSeconds,
++        "durationMs" to song.durationMs,
++        "quality" to quality,
++        "albumName" to song.album,
++        "picUrl" to song.coverUrl,
++        "meta" to meta,
++    )
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/CustomSourceRuntime.kt b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/CustomSourceRuntime.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/provider/lxuser/CustomSourceRuntime.kt
+@@ -0,0 +1,64 @@
++/*
++ * NeriPlayer - A unified Android player for streaming music and videos from multiple online platforms.
++ * Copyright (C) 2025-2025 NeriPlayer developers
++ * https://github.com/cwuom/NeriPlayer
++ *
++ * This software is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This software is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this software.
++ * If not, see <https://www.gnu.org/licenses/>.
++ *
++ * File: moe.ouom.neriplayer.core.provider.lxuser/CustomSourceRuntime
++ */
++
++package moe.ouom.neriplayer.core.provider.lxuser
++
++import android.content.Context
++import kotlinx.coroutines.flow.first
++import moe.ouom.neriplayer.data.settings.AutoSettingSpecRepository
++import moe.ouom.neriplayer.data.settings.CustomSourceSettings
++
++/**
++ * 自定义音源阶段的进程级状态：开关的同步读取入口 + 解析器单例。
++ *
++ * 开关的真身是 DataStore 里的设置项（见 [CustomSourceSettings]）。播放解析路径在线程池里跑，
++ * 不适合每次解析都挂起去读 DataStore，所以这里缓存一份；设置项变更时由 UI 调用 [invalidate]
++ * 让下次解析重新读取，保证只有 DataStore 一个事实来源（备份恢复也不会和缓存不一致）。
++ */
++internal object CustomSourceRuntime {
++
++    @Volatile
++    private var enabledCache: Boolean? = null
++
++    private var resolverRef: LxUserPlaybackResolver? = null
++
++    /** 读取开关；首次调用会挂起读一次 DataStore，之后走缓存。 */
++    suspend fun isEnabled(context: Context): Boolean {
++        enabledCache?.let { return it }
++        val appContext = context.applicationContext
++        val value = runCatching {
++            AutoSettingSpecRepository(appContext).flow(CustomSourceSettings.enabled).first()
++        }.getOrDefault(CustomSourceSettings.enabled.defaultValue)
++        enabledCache = value
++        return value
++    }
++
++    /** 设置项变更后调用，让下次解析重新读 DataStore。 */
++    fun invalidate() {
++        enabledCache = null
++    }
++
++    fun resolver(context: Context): LxUserPlaybackResolver =
++        resolverRef ?: synchronized(this) {
++            resolverRef ?: LxUserPlaybackResolver(context.applicationContext).also { resolverRef = it }
++        }
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/data/settings/CustomSourceSettings.kt b/app/src/main/java/moe/ouom/neriplayer/data/settings/CustomSourceSettings.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/data/settings/CustomSourceSettings.kt
+@@ -0,0 +1,58 @@
++/*
++ * NeriPlayer - A unified Android player for streaming music and videos from multiple online platforms.
++ * Copyright (C) 2025-2025 NeriPlayer developers
++ * https://github.com/cwuom/NeriPlayer
++ *
++ * This software is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This software is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this software.
++ * If not, see <https://www.gnu.org/licenses/>.
++ *
++ * File: moe.ouom.neriplayer.data/settings/CustomSourceSettings
++ */
++
++package moe.ouom.neriplayer.data.settings
++
++import moe.ouom.neriplayer.R
++import moe.ouom.neriplayer.ksp.annotations.AutoSettingIcon
++import moe.ouom.neriplayer.ksp.annotations.AutoSettingSpec
++import moe.ouom.neriplayer.ksp.annotations.autoSwitchSetting
++
++/**
++ * 自定义音源（LX Music 用户脚本）的开关。
++ *
++ * 这里用字面量 [AutoSettingSpec]（`AutoSettingSpecSwitchItem` 会直接读写同一个 DataStore），
++ * 而不是登记进 `AutoSettingsSchema`：该开关不需要进自动备份与设置搜索索引，而改动登记表会牵动
++ * KSP 生成物与 `AutoSettingsGeneratedTest` 的精确断言，收益不成比例。
++ */
++object CustomSourceSettings {
++
++    val enabled: AutoSettingSpec<Boolean> = autoSwitchSetting(
++        key = "custom_source_enabled",
++        defaultValue = false,
++        titleRes = R.string.settings_custom_source_enabled,
++        descriptionRes = R.string.settings_custom_source_enabled_desc,
++        icon = AutoSettingIcon.Public
++    )
++
++    /**
++     * 仅用于渲染「导入音源脚本」这一行（点击即打开文件选择器），不会被真正读写。
++     * 复用 [AutoSettingSpec] 只是为了拿到与其它设置项一致的标题/描述/图标版式。
++     */
++    val importScript: AutoSettingSpec<Boolean> = autoSwitchSetting(
++        key = "custom_source_import_action",
++        defaultValue = false,
++        titleRes = R.string.settings_custom_source_import,
++        descriptionRes = R.string.settings_custom_source_import_desc,
++        icon = AutoSettingIcon.Download
++    )
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/resolver/netease/PlayerManagerNeteaseCustomSourceSwitch.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/resolver/netease/PlayerManagerNeteaseCustomSourceSwitch.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/resolver/netease/PlayerManagerNeteaseCustomSourceSwitch.kt
+@@ -0,0 +1,140 @@
++/*
++ * NeriPlayer - A unified Android player for streaming music and videos from multiple online platforms.
++ * Copyright (C) 2025-2025 NeriPlayer developers
++ * https://github.com/cwuom/NeriPlayer
++ *
++ * This software is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This software is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this software.
++ * If not, see <https://www.gnu.org/licenses/>.
++ *
++ * File: moe.ouom.neriplayer.core.player.resolver.netease/PlayerManagerNeteaseCustomSourceSwitch
++ */
++
++package moe.ouom.neriplayer.core.player.resolver.netease
++
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import moe.ouom.neriplayer.core.logging.NPLogger
++import moe.ouom.neriplayer.core.player.PlayerManager
++import moe.ouom.neriplayer.core.player.model.PlaybackAudioInfo
++import moe.ouom.neriplayer.core.player.model.PlaybackAudioSource
++import moe.ouom.neriplayer.core.player.model.SongUrlResult
++import moe.ouom.neriplayer.core.player.model.deriveCodecLabel
++import moe.ouom.neriplayer.core.player.url.qualityLabelForNetease
++import moe.ouom.neriplayer.core.provider.lxuser.CustomSourceRuntime
++import moe.ouom.neriplayer.core.provider.lxuser.LxUserResolvedSource
++import moe.ouom.neriplayer.core.provider.lxuser.lxRankForQualityKey
++import moe.ouom.neriplayer.data.model.SongItem
++
++private const val CUSTOM_SOURCE_TAG = "NERI-CustomSource"
++private val customSourceCacheKeyUnsafeRegex = Regex("[^A-Za-z0-9_.-]+")
++
++/**
++ * 用用户导入的 LX 自定义音源解析网易云歌曲。
++ *
++ * 返回值语义与其它回退阶段一致：`null` 表示「开关关闭 / 没有脚本 / 全部失败」，调用方继续回退。
++ * 该阶段排在 B 站自动源**之前**：B 站拿到的多是转录/翻录视频，音质明显不如音源站的直链。
++ */
++internal suspend fun PlayerManager.tryResolveNeteaseCustomSource(
++    song: SongItem,
++    requestedQualityKey: String,
++    hasPlayableFallback: Boolean,
++    urgent: Boolean = true
++): SongUrlResult? {
++    val appContext = application
++    if (!CustomSourceRuntime.isEnabled(appContext)) return null
++    val resolver = CustomSourceRuntime.resolver(appContext)
++    if (!resolver.hasSources()) return null
++
++    val resolved = withContext(Dispatchers.IO) {
++        runCatching {
++            resolver.resolve(
++                song = song,
++                requestedQualityKey = requestedQualityKey,
++                hasPlayableFallback = hasPlayableFallback,
++                urgent = urgent
++            )
++        }.onFailure { error ->
++            NPLogger.w(CUSTOM_SOURCE_TAG, "custom source resolve failed songId=${song.id}", error)
++        }.getOrNull()
++    } ?: return null
++
++    return buildCustomSourceSuccess(song, requestedQualityKey, resolved)
++}
++
++private fun PlayerManager.buildCustomSourceSuccess(
++    song: SongItem,
++    requestedQualityKey: String,
++    resolved: LxUserResolvedSource
++): SongUrlResult.Success {
++    // 码率只能判断到"是不是 24bit 级"，分不出超清母带 / 沉浸环绕声 / 高清环绕声 / Hi-Res
++    // 这些同属 24bit 的档位。所以实测档位证实达到了所选档位时，档位键就用所选档位，
++    // 免得设了母带却显示 Hi-Res 让人以为拿错了；达不到所选档位时如实显示实测档位
++    // （例如设母带但源站只有 16bit → 显示"无损"）。
++    val displayQualityKey = if (resolved.rank >= lxRankForQualityKey(requestedQualityKey)) {
++        requestedQualityKey
++    } else {
++        resolved.qualityKey
++    }
++    val mimeType = resolved.mimeType
++    NPLogger.w(
++        CUSTOM_SOURCE_TAG,
++        "custom source selected: song=${song.name}, script=${resolved.scriptId}, " +
++            "requested=$requestedQualityKey, measured=${resolved.qualityKey}, displayed=$displayQualityKey, " +
++            "rank=${resolved.rank}, bitrateKbps=${resolved.bitrateKbps}, bytes=${resolved.contentLength}"
++    )
++    return SongUrlResult.Success(
++        url = resolved.url,
++        durationMs = song.durationMs.takeIf { it > 0L },
++        mimeType = mimeType,
++        expectedContentLength = resolved.contentLength,
++        audioInfo = PlaybackAudioInfo(
++            source = PlaybackAudioSource.CUSTOM,
++            qualityKey = displayQualityKey,
++            qualityLabel = displayQualityKey?.let { key ->
++                qualityLabelForNetease(key) { getLocalizedString(it) }
++            },
++            codecLabel = deriveCodecLabel(mimeType),
++            mimeType = mimeType,
++            bitrateKbps = resolved.bitrateKbps
++        ),
++        // 缓存键与表示指纹仍用实测值：它们描述的是"实际这条流"，与显示用哪个档位名无关。
++        representationIdentity = buildCustomSourceRepresentationIdentity(resolved),
++        cacheKeyOverride = buildCustomSourceCacheKey(resolved)
++    )
++}
++
++/**
++ * 缓存键要带上脚本 id 与实测档位，否则换了脚本或档位后，旧字节会被当成同一份资源命中。
++ */
++internal fun buildCustomSourceCacheKey(resolved: LxUserResolvedSource): String {
++    val scriptPart = sanitizeCustomSourceCacheKeyPart(resolved.scriptId)
++    val qualityPart = sanitizeCustomSourceCacheKeyPart(resolved.qualityKey ?: "unknown")
++    return "lx-$scriptPart-$qualityPart"
++}
++
++internal fun buildCustomSourceRepresentationIdentity(resolved: LxUserResolvedSource): String {
++    return listOf(
++        resolved.scriptId,
++        resolved.rank.toString(),
++        resolved.mimeType.orEmpty().lowercase(),
++        resolved.bitrateKbps?.toString().orEmpty()
++    ).joinToString(separator = "|")
++}
++
++private fun sanitizeCustomSourceCacheKeyPart(value: String): String {
++    return customSourceCacheKeyUnsafeRegex
++        .replace(value.trim(), "_")
++        .trim('_')
++        .ifBlank { "unknown" }
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerUrlExtensions.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerUrlExtensions.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerUrlExtensions.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerUrlExtensions.kt
+@@ -50,6 +50,7 @@
+ import moe.ouom.neriplayer.core.player.quality.effectiveYouTubeQuality
+ import moe.ouom.neriplayer.core.player.resolver.netease.NeteasePlaybackResponseParser
+ import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseAutoBiliSource
++import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseCustomSource
+ import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseMatchedLocalSource
+ import moe.ouom.neriplayer.core.player.watchdog.configureActivePlaybackCandidates
+ import moe.ouom.neriplayer.core.player.watchdog.currentPlaybackCandidate
+@@ -350,6 +351,7 @@
+                 suppressError = suppressError,
+                 sideEffects = resolverSideEffects,
+                 allowLocalFallback = !shouldDeferNeteaseAlternateSources,
++                allowCustomSourceFallback = !shouldDeferNeteaseAlternateSources,
+                 allowAutoBiliFallback = !shouldDeferNeteaseAlternateSources
+             )
+         }
+@@ -1480,6 +1482,7 @@
+     sideEffects: RefreshResolverSideEffects = RefreshResolverSideEffects(),
+     allowLocalFallback: Boolean = true,
+     allowPreviewFallback: Boolean = true,
++    allowCustomSourceFallback: Boolean = true,
+     allowAutoBiliFallback: Boolean = true
+ ): SongUrlResult = withContext(Dispatchers.IO) {
+     try {
+@@ -1532,11 +1535,26 @@
+                         }
+                     }
+                     if (parsed.notice != NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP) {
+-                        if (quality != effectiveQuality) {
++                        // 只比"实际返回"的档位与所选档位。免费歌曲的典型情况是：请求母带，
++                        // 官方正常返回 200 + exhigh 完整流，此时请求的候选档位恰好等于所选档位，
++                        // 若拿请求档位去比就会误判成"已达所选音质"，于是免费歌曲永远停在官方给的那一档，
++                        // 只有（返回试听片段的）VIP 歌曲才会去找自定义源。
++                        val actualQualityKey = normalizeNeteaseQualityKey(success.audioInfo?.qualityKey)
++                        if (isNeteaseQualityBelowRequested(actualQualityKey, effectiveQuality)) {
+                             NPLogger.w(
+                                 "NERI-PlayerManager",
+-                                "当前音质不可用，已自动降级: id=${song.id}, preferred=$effectiveQuality, resolved=$quality"
++                                "官方档位低于所选，尝试自定义音源: id=${song.id}, " +
++                                    "preferred=$effectiveQuality, actual=${actualQualityKey ?: "unknown"}"
+                             )
++                            if (allowCustomSourceFallback) {
++                                // 给足预算：此时手上虽然有一条可播的完整流，但用户选的是更高档位，
++                                // 拿不到才回退官方那条，所以等一等只为质量、不影响可用性。
++                                tryResolveNeteaseCustomSource(
++                                    song = song,
++                                    requestedQualityKey = effectiveQuality,
++                                    hasPlayableFallback = false
++                                )?.let { return@withContext it }
++                            }
+                         }
+                         return@withContext success
+                     }
+@@ -1575,6 +1593,18 @@
+                     return@withContext it
+                 }
+             }
++            if (allowCustomSourceFallback) {
++                // 自定义音源排在 B 站自动源之前：B 站拿到的是转录/翻录视频，音质明显更差。
++                // 官方只给试听片段或无权限时，这里给足预算——试听片段（30 秒）毫无价值，
++                // 自定义源是唯一可能拿到完整无损的途径。
++                tryResolveNeteaseCustomSource(
++                    song = song,
++                    requestedQualityKey = effectiveQuality,
++                    hasPlayableFallback = false
++                )?.let {
++                    return@withContext it
++                }
++            }
+             if (allowAutoBiliFallback) {
+                 tryResolveNeteaseAutoBiliSource(song, sideEffects)?.let {
+                     return@withContext it
+@@ -1622,6 +1652,28 @@
+     }
+ }
+ 
++/**
++ * 官方实际返回的档位是否低于所选档位。
++ *
++ * 档位高低用 [NETEASE_QUALITY_FALLBACK_ORDER] 的索引表示（越靠前档位越高）。识别不出实际档位时
++ * 按"低于"处理，交给自定义音源试一次——宁可多试一次，也不要把免费歌曲永久钉在官方那一档。
++ */
++private fun isNeteaseQualityBelowRequested(
++    actualQualityKey: String?,
++    requestedQualityKey: String
++): Boolean {
++    val requested = neteaseQualityOrderIndex(requestedQualityKey)
++    if (requested < 0) return false
++    val actual = neteaseQualityOrderIndex(actualQualityKey)
++    if (actual < 0) return true
++    return actual > requested
++}
++
++private fun neteaseQualityOrderIndex(qualityKey: String?): Int {
++    val normalized = normalizeNeteaseQualityKey(qualityKey) ?: return -1
++    return NETEASE_QUALITY_FALLBACK_ORDER.indexOf(normalized)
++}
++
+ private suspend fun PlayerManager.getBiliAudioUrl(
+     song: SongItem,
+     suppressError: Boolean = false,
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/model/PlaybackAudioInfo.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/model/PlaybackAudioInfo.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/model/PlaybackAudioInfo.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/model/PlaybackAudioInfo.kt
+@@ -5,6 +5,8 @@
+ enum class PlaybackAudioSource {
+     LOCAL,
+     NETEASE,
++    /** 用户导入的 LX 自定义音源：网易云歌曲的回退来源，排在 B 站之前。 */
++    CUSTOM,
+     BILIBILI,
+     YOUTUBE_MUSIC
+ }
+@@ -137,6 +139,8 @@
+ fun PreferredQualityKeys.forSource(source: PlaybackAudioSource): String? {
+     return when (source) {
+         PlaybackAudioSource.NETEASE -> netease
++        // 自定义音源是网易云的替代来源，档位沿用网易云的键。
++        PlaybackAudioSource.CUSTOM -> netease
+         PlaybackAudioSource.YOUTUBE_MUSIC -> youtube
+         PlaybackAudioSource.BILIBILI -> bili
+         PlaybackAudioSource.LOCAL -> null
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/PlayerManager.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/PlayerManager.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/PlayerManager.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/PlayerManager.kt
+@@ -1790,6 +1790,8 @@
+         ioScope.launch {
+             when (currentAudioInfo.source) {
+                 PlaybackAudioSource.NETEASE -> settingsRepo.setAudioQuality(normalizedKey)
++                // 自定义音源按网易云的档位键请求音源站，所以改的是同一个偏好。
++                PlaybackAudioSource.CUSTOM -> settingsRepo.setAudioQuality(normalizedKey)
+                 PlaybackAudioSource.BILIBILI -> settingsRepo.setBiliAudioQuality(normalizedKey)
+                 PlaybackAudioSource.YOUTUBE_MUSIC -> settingsRepo.setYouTubeAudioQuality(normalizedKey)
+                 PlaybackAudioSource.LOCAL -> Unit
+@@ -2000,6 +2002,8 @@
+     ) {
+         val targetJob = when (source) {
+             PlaybackAudioSource.NETEASE -> ::neteaseQualityRefreshJob
++            // 自定义音源走的就是网易云那条解析链（自定义源排在最前），沿用同一个刷新任务。
++            PlaybackAudioSource.CUSTOM -> ::neteaseQualityRefreshJob
+             PlaybackAudioSource.YOUTUBE_MUSIC -> ::youtubeQualityRefreshJob
+             PlaybackAudioSource.BILIBILI -> ::biliQualityRefreshJob
+             PlaybackAudioSource.LOCAL -> return
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerListenTogetherStreamExtensions.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerListenTogetherStreamExtensions.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerListenTogetherStreamExtensions.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/url/PlayerManagerListenTogetherStreamExtensions.kt
+@@ -192,6 +192,8 @@
+     val normalized = normalizeListenTogetherQualityKey(source, qualityKey) ?: return null
+     return when (source) {
+         PlaybackAudioSource.NETEASE -> NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
++        // 自定义音源的档位与流地址都沿用网易云那一套。
++        PlaybackAudioSource.CUSTOM -> NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
+         PlaybackAudioSource.BILIBILI -> BILI_LISTEN_TOGETHER_QUALITY_ORDER
+         PlaybackAudioSource.YOUTUBE_MUSIC -> YOUTUBE_LISTEN_TOGETHER_QUALITY_ORDER
+         PlaybackAudioSource.LOCAL -> emptyList()
+@@ -217,6 +219,9 @@
+         PlaybackAudioSource.NETEASE -> normalized.takeIf {
+             it in NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
+         }
++        PlaybackAudioSource.CUSTOM -> normalized.takeIf {
++            it in NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
++        }
+         PlaybackAudioSource.BILIBILI -> normalized.takeIf {
+             it in BILI_LISTEN_TOGETHER_QUALITY_ORDER
+         }
+@@ -230,6 +235,7 @@
+ private fun listenTogetherSourceKey(source: PlaybackAudioSource): String {
+     return when (source) {
+         PlaybackAudioSource.NETEASE -> "netease"
++        PlaybackAudioSource.CUSTOM -> "netease"
+         PlaybackAudioSource.BILIBILI -> "bili"
+         PlaybackAudioSource.YOUTUBE_MUSIC -> "youtube"
+         PlaybackAudioSource.LOCAL -> "local"
+@@ -336,6 +342,7 @@
+     val source = listenTogetherPlaybackSource(song)
+     val preferredQualityKey = when (source) {
+         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
++        PlaybackAudioSource.CUSTOM -> effectiveNeteaseQuality()
+         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
+         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
+         PlaybackAudioSource.LOCAL -> ""
+@@ -371,6 +378,7 @@
+ internal fun PlayerManager.listenTogetherPreferredQualityKey(song: SongItem): String? {
+     return when (listenTogetherPlaybackSource(song)) {
+         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
++        PlaybackAudioSource.CUSTOM -> effectiveNeteaseQuality()
+         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
+         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
+         PlaybackAudioSource.LOCAL -> null
+@@ -412,6 +420,11 @@
+             preferredQualityKey = preferredQualityKey,
+             getLocalizedString = getLocalizedString
+         )
++        // 自定义音源的档位键与缓存音频信息都按网易云呈现。
++        PlaybackAudioSource.CUSTOM -> buildNeteaseOfflineCacheAudioInfo(
++            preferredQualityKey = preferredQualityKey,
++            getLocalizedString = getLocalizedString
++        )
+         PlaybackAudioSource.YOUTUBE_MUSIC -> buildYouTubeOfflineCacheAudioInfo(
+             preferredQualityKey = preferredQualityKey,
+             getLocalizedString = getLocalizedString
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/url/ListenTogetherQualityPolicy.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/url/ListenTogetherQualityPolicy.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/url/ListenTogetherQualityPolicy.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/url/ListenTogetherQualityPolicy.kt
+@@ -17,6 +17,7 @@
+ internal fun maxListenTogetherStreamUrlCandidates(source: PlaybackAudioSource): Int {
+     return when (source) {
+         PlaybackAudioSource.NETEASE -> MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
++        PlaybackAudioSource.CUSTOM -> MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
+         PlaybackAudioSource.BILIBILI -> MAX_LISTEN_TOGETHER_BILI_STREAM_URL_CANDIDATES
+         PlaybackAudioSource.YOUTUBE_MUSIC -> MAX_LISTEN_TOGETHER_YOUTUBE_STREAM_URL_CANDIDATES
+         PlaybackAudioSource.LOCAL -> 0
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/url/CachedPlaybackDescriptor.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/url/CachedPlaybackDescriptor.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/url/CachedPlaybackDescriptor.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/url/CachedPlaybackDescriptor.kt
+@@ -167,6 +167,7 @@
+ ): String {
+     return when (source) {
+         PlaybackAudioSource.NETEASE -> qualityLabelForNetease(key, getLocalizedString)
++        PlaybackAudioSource.CUSTOM -> qualityLabelForNetease(key, getLocalizedString)
+         PlaybackAudioSource.BILIBILI -> qualityLabelForBili(key, getLocalizedString)
+         PlaybackAudioSource.YOUTUBE_MUSIC -> qualityLabelForYouTube(key, getLocalizedString)
+         PlaybackAudioSource.LOCAL -> key
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/quality/PlayerManagerTrafficQualityExtensions.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/quality/PlayerManagerTrafficQualityExtensions.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/quality/PlayerManagerTrafficQualityExtensions.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/quality/PlayerManagerTrafficQualityExtensions.kt
+@@ -47,6 +47,9 @@
+     return when (source) {
+         PlaybackAudioSource.NETEASE ->
+             normalizeMobileDataNeteaseAudioQuality(mobileDataNeteaseAudioQuality)
++        // 自定义音源是网易云的替代来源，移动网络降级档位沿用网易云的设置。
++        PlaybackAudioSource.CUSTOM ->
++            normalizeMobileDataNeteaseAudioQuality(mobileDataNeteaseAudioQuality)
+         PlaybackAudioSource.YOUTUBE_MUSIC ->
+             normalizeMobileDataYouTubeAudioQuality(mobileDataYouTubeAudioQuality)
+         PlaybackAudioSource.BILIBILI ->
+diff --git a/app/src/main/java/moe/ouom/neriplayer/core/player/policy/offload/PlaybackAudioOffloadPolicy.kt b/app/src/main/java/moe/ouom/neriplayer/core/player/policy/offload/PlaybackAudioOffloadPolicy.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/core/player/policy/offload/PlaybackAudioOffloadPolicy.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/core/player/policy/offload/PlaybackAudioOffloadPolicy.kt
+@@ -18,8 +18,9 @@
+     audioSource: PlaybackAudioSource?,
+     listenTogetherPlaybackRate: Float,
+ ): Boolean {
+-    // 网易云直链和 B 站换源都容易触发系统 offload 残留缓冲，主动走 PCM 管线
++    // 网易云直链、自定义音源直链和 B 站换源都容易触发系统 offload 残留缓冲，主动走 PCM 管线
+     return audioSource == PlaybackAudioSource.NETEASE ||
++        audioSource == PlaybackAudioSource.CUSTOM ||
+         audioSource == PlaybackAudioSource.BILIBILI ||
+         usbExclusivePlaybackEnabled ||
+         abs(playbackSpeed - 1f) > PLAYBACK_PARAMETER_EPSILON ||
+diff --git a/app/src/main/java/moe/ouom/neriplayer/ui/component/playback/PlaybackSourceBadge.kt b/app/src/main/java/moe/ouom/neriplayer/ui/component/playback/PlaybackSourceBadge.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/ui/component/playback/PlaybackSourceBadge.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/ui/component/playback/PlaybackSourceBadge.kt
+@@ -31,6 +31,7 @@
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.outlined.Extension
+ import androidx.compose.material.icons.outlined.LibraryMusic
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.MaterialTheme
+@@ -45,6 +46,8 @@
+ 
+ enum class PlaybackSourceType {
+     NETEASE,
++    /** 用户导入的 LX 自定义音源 */
++    CUSTOM,
+     BILIBILI,
+     YOUTUBE_MUSIC,
+     LOCAL
+@@ -80,6 +83,20 @@
+                 )
+             }
+ 
++            PlaybackSourceType.CUSTOM -> {
++                Icon(
++                    imageVector = Icons.Outlined.Extension,
++                    contentDescription = stringResource(R.string.nowplaying_custom_source),
++                    tint = MaterialTheme.colorScheme.onSurface,
++                    modifier = Modifier.size(16.dp)
++                )
++                Text(
++                    text = stringResource(R.string.nowplaying_custom_source),
++                    style = MaterialTheme.typography.labelSmall,
++                    color = MaterialTheme.colorScheme.onSurface
++                )
++            }
++
+             PlaybackSourceType.BILIBILI -> {
+                 Icon(
+                     painter = painterResource(id = R.drawable.ic_bilibili),
+diff --git a/app/src/main/java/moe/ouom/neriplayer/ui/screen/NowPlayingScreen.kt b/app/src/main/java/moe/ouom/neriplayer/ui/screen/NowPlayingScreen.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/ui/screen/NowPlayingScreen.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/ui/screen/NowPlayingScreen.kt
+@@ -1753,6 +1753,7 @@
+ 
+     when (playbackAudioSource) {
+         PlaybackAudioSource.NETEASE -> return PlaybackSourceType.NETEASE
++        PlaybackAudioSource.CUSTOM -> return PlaybackSourceType.CUSTOM
+         PlaybackAudioSource.BILIBILI -> return PlaybackSourceType.BILIBILI
+         PlaybackAudioSource.YOUTUBE_MUSIC -> return PlaybackSourceType.YOUTUBE_MUSIC
+         PlaybackAudioSource.LOCAL,
+diff --git a/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/settings/component/CustomSourceSetting.kt b/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/settings/component/CustomSourceSetting.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/settings/component/CustomSourceSetting.kt
+@@ -0,0 +1,183 @@
++/*
++ * NeriPlayer - A unified Android player for streaming music and videos from multiple online platforms.
++ * Copyright (C) 2025-2025 NeriPlayer developers
++ * https://github.com/cwuom/NeriPlayer
++ *
++ * This software is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This software is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this software.
++ * If not, see <https://www.gnu.org/licenses/>.
++ *
++ * File: moe.ouom.neriplayer.ui.screen.tab.settings/component/CustomSourceSetting
++ */
++
++package moe.ouom.neriplayer.ui.screen.tab.settings.component
++
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.outlined.Delete
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.ListItemDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.unit.dp
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import moe.ouom.neriplayer.R
++import moe.ouom.neriplayer.core.logging.NPLogger
++import moe.ouom.neriplayer.core.provider.lxuser.CustomSourceRuntime
++import moe.ouom.neriplayer.core.provider.lxuser.LxUserSourceRecord
++import moe.ouom.neriplayer.core.provider.lxuser.LxUserSourceStore
++import moe.ouom.neriplayer.data.config.LimitedTextReader
++import moe.ouom.neriplayer.data.settings.CustomSourceSettings
++
++private const val CUSTOM_SOURCE_TAG = "NERI-CustomSource"
++private const val MAX_SCRIPT_BYTES = 9_000_000L
++
++/**
++ * 「播放源」设置分组里的自定义音源区块：开关 + 导入脚本 + 已导入列表。
++ *
++ * 开关本身是标准的 [AutoSettingSpec]（见 [CustomSourceSettings]），这里只额外做两件事：
++ * 变更后让 [CustomSourceRuntime] 的缓存失效（下次解析重读），以及脚本的导入/删除。
++ */
++@Composable
++internal fun CustomSourceSetting(
++    modifier: Modifier = Modifier,
++    highlightTargetId: String? = null,
++    highlightPulse: Int = 0,
++    onHighlightFinished: (() -> Unit)? = null
++) {
++    val context = LocalContext.current
++    val scope = rememberCoroutineScope()
++    var scripts by remember { mutableStateOf(LxUserSourceStore.list(context)) }
++
++    val importLauncher = rememberLauncherForActivityResult(
++        contract = ActivityResultContracts.OpenDocument()
++    ) { uri ->
++        if (uri == null) return@rememberLauncherForActivityResult
++        scope.launch {
++            val imported = withContext(Dispatchers.IO) {
++                runCatching {
++                    val text = LimitedTextReader.readUtf8(context, uri, MAX_SCRIPT_BYTES)
++                    LxUserSourceStore.import(context, text)
++                }.onFailure { error ->
++                    NPLogger.w(CUSTOM_SOURCE_TAG, "import script failed", error)
++                }.getOrNull()
++            }
++            if (imported == null) {
++                // 失败只记日志：脚本文件可能是任意内容，这里不弹窗打断用户，
++                // 列表刷新后没有新条目本身就是反馈。
++                NPLogger.w(CUSTOM_SOURCE_TAG, "import rejected: not a valid LX source script")
++            }
++            scripts = LxUserSourceStore.list(context)
++        }
++    }
++
++    Column(modifier = modifier) {
++        AutoSettingSpecSwitchItem(
++            setting = CustomSourceSettings.enabled,
++            highlightTargetId = highlightTargetId,
++            highlightPulse = highlightPulse,
++            onHighlightFinished = onHighlightFinished,
++            afterCheckedChange = { CustomSourceRuntime.invalidate() }
++        )
++        AutoSettingSpecListItem(
++            setting = CustomSourceSettings.importScript,
++            highlightTargetId = highlightTargetId,
++            highlightPulse = highlightPulse,
++            onHighlightFinished = onHighlightFinished,
++            onClick = { importLauncher.launch(arrayOf("*/*")) }
++        )
++
++        if (scripts.isEmpty()) {
++            Text(
++                text = stringResource(R.string.settings_custom_source_empty),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
++            )
++        } else {
++            Text(
++                text = stringResource(R.string.settings_custom_source_imported, scripts.size),
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.padding(start = 16.dp, top = 4.dp)
++            )
++            scripts.forEach { record ->
++                CustomSourceScriptItem(
++                    record = record,
++                    onRemove = {
++                        scope.launch {
++                            withContext(Dispatchers.IO) {
++                                runCatching { LxUserSourceStore.remove(context, record.id) }
++                                    .onFailure { error ->
++                                        NPLogger.w(CUSTOM_SOURCE_TAG, "remove script failed id=${record.id}", error)
++                                    }
++                            }
++                            scripts = LxUserSourceStore.list(context)
++                        }
++                    }
++                )
++            }
++        }
++    }
++}
++
++@Composable
++private fun CustomSourceScriptItem(
++    record: LxUserSourceRecord,
++    onRemove: () -> Unit
++) {
++    val metadata = record.metadata
++    val title = metadata.name?.takeIf { it.isNotBlank() } ?: record.id
++    val details = listOfNotNull(
++        metadata.version?.takeIf { it.isNotBlank() },
++        metadata.author?.takeIf { it.isNotBlank() }
++    ).joinToString(separator = " · ")
++    val supporting: (@Composable () -> Unit)? = if (details.isBlank()) {
++        null
++    } else {
++        { Text(details) }
++    }
++
++    ListItem(
++        headlineContent = { Text(title) },
++        supportingContent = supporting,
++        trailingContent = {
++            IconButton(onClick = onRemove) {
++                Icon(
++                    imageVector = Icons.Outlined.Delete,
++                    contentDescription = stringResource(R.string.settings_custom_source_remove),
++                    modifier = Modifier.size(22.dp)
++                )
++            }
++        },
++        colors = ListItemDefaults.colors(containerColor = Color.Transparent)
++    )
++}
+diff --git a/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/SettingsScreen.kt b/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/SettingsScreen.kt
+--- a/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/SettingsScreen.kt
++++ b/app/src/main/java/moe/ouom/neriplayer/ui/screen/tab/SettingsScreen.kt
+@@ -176,6 +176,7 @@
+ import moe.ouom.neriplayer.ui.screen.tab.settings.auth.SettingsBiliAuthDialogs
+ import moe.ouom.neriplayer.ui.screen.tab.settings.auth.SettingsNeteaseAuthDialogs
+ import moe.ouom.neriplayer.ui.screen.tab.settings.auth.SettingsYouTubeAuthDialogs
++import moe.ouom.neriplayer.ui.screen.tab.settings.component.CustomSourceSetting
+ import moe.ouom.neriplayer.ui.screen.tab.settings.component.LazyAnimatedVisibility
+ import moe.ouom.neriplayer.ui.screen.tab.settings.component.PlaybackServiceIdleShutdownSetting
+ import moe.ouom.neriplayer.ui.screen.tab.settings.component.SettingsAudioQualitySection
+@@ -1916,6 +1917,11 @@
+                                 onNeteaseAutoSourceSwitchChange(!neteaseAutoSourceSwitch)
+                             }
+                         )
++                        CustomSourceSetting(
++                            highlightTargetId = settingsHighlightTargetId,
++                            highlightPulse = settingsHighlightPulse,
++                            onHighlightFinished = onSettingsHighlightFinished
++                        )
+                     }
+                 }
+ 
+diff --git a/app/src/main/res/values/strings_auth.xml b/app/src/main/res/values/strings_auth.xml
+--- a/app/src/main/res/values/strings_auth.xml
++++ b/app/src/main/res/values/strings_auth.xml
+@@ -136,4 +136,12 @@
+     <string name="login_paste_bili_cookie_hint">粘贴 Cookie（例如：SESSDATA=…; bili_jct=…）</string>
+     <string name="login_paste_youtube_cookie_hint">粘贴 Cookie 或浏览器请求头（需包含 Cookie）</string>
+     <string name="settings_cookie_input_hint">请输入 Cookie</string>
++    <string name="settings_custom_source_enabled">自定义音源</string>
++    <string name="settings_custom_source_enabled_desc">默认关闭；开启后，网易云歌曲无权限、只返回试听片段、或仅给到低于所选档位的音质时，优先用导入的音源脚本解析，失败才回退哔哩哔哩</string>
++    <string name="settings_custom_source_import">导入音源脚本</string>
++    <string name="settings_custom_source_import_desc">支持 lx-music 的自定义音源脚本（.js）；导入后立即生效，点列表项可删除</string>
++    <string name="settings_custom_source_empty">还没有导入音源脚本</string>
++    <string name="settings_custom_source_remove">删除</string>
++    <string name="settings_custom_source_import_failed">导入失败：不是有效的音源脚本</string>
++    <string name="settings_custom_source_imported">已导入 %1$d 个音源脚本</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings_auth.xml b/app/src/main/res/values-zh/strings_auth.xml
+--- a/app/src/main/res/values-zh/strings_auth.xml
++++ b/app/src/main/res/values-zh/strings_auth.xml
+@@ -136,4 +136,12 @@
+     <string name="login_paste_bili_cookie_hint">粘贴 Cookie（例如：SESSDATA=…; bili_jct=…）</string>
+     <string name="login_paste_youtube_cookie_hint">粘贴 Cookie 或浏览器请求头（需包含 Cookie）</string>
+     <string name="settings_cookie_input_hint">请输入 Cookie</string>
++    <string name="settings_custom_source_enabled">自定义音源</string>
++    <string name="settings_custom_source_enabled_desc">默认关闭；开启后，网易云歌曲无权限、只返回试听片段、或仅给到低于所选档位的音质时，优先用导入的音源脚本解析，失败才回退哔哩哔哩</string>
++    <string name="settings_custom_source_import">导入音源脚本</string>
++    <string name="settings_custom_source_import_desc">支持 lx-music 的自定义音源脚本（.js）；导入后立即生效，点列表项可删除</string>
++    <string name="settings_custom_source_empty">还没有导入音源脚本</string>
++    <string name="settings_custom_source_remove">删除</string>
++    <string name="settings_custom_source_import_failed">导入失败：不是有效的音源脚本</string>
++    <string name="settings_custom_source_imported">已导入 %1$d 个音源脚本</string>
+ </resources>
+diff --git a/app/src/main/res/values-en/strings_auth.xml b/app/src/main/res/values-en/strings_auth.xml
+--- a/app/src/main/res/values-en/strings_auth.xml
++++ b/app/src/main/res/values-en/strings_auth.xml
+@@ -136,4 +136,12 @@
+     <string name="login_paste_bili_cookie_hint">Paste Cookie (e.g.: SESSDATA=…; bili_jct=…)</string>
+     <string name="login_paste_youtube_cookie_hint">Paste Cookie or browser request headers (must include Cookie)</string>
+     <string name="settings_cookie_input_hint">Please enter Cookie</string>
++    <string name="settings_custom_source_enabled">Custom Source</string>
++    <string name="settings_custom_source_enabled_desc">Off by default. When enabled, imported source scripts are tried first for NetEase songs that are unavailable, return only a preview clip, or come back below the selected quality; Bilibili is the fallback.</string>
++    <string name="settings_custom_source_import">Import source script</string>
++    <string name="settings_custom_source_import_desc">Supports lx-music user-source scripts (.js). Scripts take effect immediately; tap an entry to remove it.</string>
++    <string name="settings_custom_source_empty">No source scripts imported yet</string>
++    <string name="settings_custom_source_remove">Remove</string>
++    <string name="settings_custom_source_import_failed">Import failed: not a valid source script</string>
++    <string name="settings_custom_source_imported">%1$d source script(s) imported</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings_playback.xml b/app/src/main/res/values/strings_playback.xml
+--- a/app/src/main/res/values/strings_playback.xml
++++ b/app/src/main/res/values/strings_playback.xml
+@@ -173,4 +173,5 @@
+     <string name="nowplaying_equalizer_wait_for_session">开始播放后会应用到当前音频会话</string>
+     <string name="nowplaying_equalizer_unsupported">当前设备可能不支持系统均衡器</string>
+     <string name="nowplaying_loudness_unsupported">当前设备可能不支持响度增强</string>
++    <string name="nowplaying_custom_source">自定义源</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings_playback.xml b/app/src/main/res/values-zh/strings_playback.xml
+--- a/app/src/main/res/values-zh/strings_playback.xml
++++ b/app/src/main/res/values-zh/strings_playback.xml
+@@ -173,4 +173,5 @@
+     <string name="nowplaying_equalizer_wait_for_session">开始播放后会应用到当前音频会话</string>
+     <string name="nowplaying_equalizer_unsupported">当前设备可能不支持系统均衡器</string>
+     <string name="nowplaying_loudness_unsupported">当前设备可能不支持响度增强</string>
++    <string name="nowplaying_custom_source">自定义源</string>
+ </resources>
+diff --git a/app/src/main/res/values-en/strings_playback.xml b/app/src/main/res/values-en/strings_playback.xml
+--- a/app/src/main/res/values-en/strings_playback.xml
++++ b/app/src/main/res/values-en/strings_playback.xml
+@@ -173,4 +173,5 @@
+     <string name="nowplaying_equalizer_wait_for_session">Start playback to apply the equalizer to the active audio session.</string>
+     <string name="nowplaying_equalizer_unsupported">This device may not support the system equalizer.</string>
+     <string name="nowplaying_loudness_unsupported">This device may not support loudness enhancement.</string>
++    <string name="nowplaying_custom_source">Custom Source</string>
+ </resources>
