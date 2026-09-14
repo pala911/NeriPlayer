@@ -33,6 +33,7 @@ import moe.ouom.neriplayer.core.player.model.deriveCodecLabel
 import moe.ouom.neriplayer.core.player.url.qualityLabelForNetease
 import moe.ouom.neriplayer.core.provider.lxuser.CustomSourceRuntime
 import moe.ouom.neriplayer.core.provider.lxuser.LxUserResolvedSource
+import moe.ouom.neriplayer.core.provider.lxuser.lxRankForQualityKey
 import moe.ouom.neriplayer.data.model.SongItem
 
 private const val CUSTOM_SOURCE_TAG = "NERI-CustomSource"
@@ -68,20 +69,29 @@ internal suspend fun PlayerManager.tryResolveNeteaseCustomSource(
         }.getOrNull()
     } ?: return null
 
-    return buildCustomSourceSuccess(song, resolved)
+    return buildCustomSourceSuccess(song, requestedQualityKey, resolved)
 }
 
 private fun PlayerManager.buildCustomSourceSuccess(
     song: SongItem,
+    requestedQualityKey: String,
     resolved: LxUserResolvedSource
 ): SongUrlResult.Success {
-    val qualityKey = resolved.qualityKey
+    // 码率只能判断到"是不是 24bit 级"，分不出超清母带 / 沉浸环绕声 / 高清环绕声 / Hi-Res
+    // 这些同属 24bit 的档位。所以实测档位证实达到了所选档位时，档位键就用所选档位，
+    // 免得设了母带却显示 Hi-Res 让人以为拿错了；达不到所选档位时如实显示实测档位
+    // （例如设母带但源站只有 16bit → 显示"无损"）。
+    val displayQualityKey = if (resolved.rank >= lxRankForQualityKey(requestedQualityKey)) {
+        requestedQualityKey
+    } else {
+        resolved.qualityKey
+    }
     val mimeType = resolved.mimeType
     NPLogger.w(
         CUSTOM_SOURCE_TAG,
         "custom source selected: song=${song.name}, script=${resolved.scriptId}, " +
-            "quality=${qualityKey ?: "unknown"}, rank=${resolved.rank}, " +
-            "bitrateKbps=${resolved.bitrateKbps}, bytes=${resolved.contentLength}"
+            "requested=$requestedQualityKey, measured=${resolved.qualityKey}, displayed=$displayQualityKey, " +
+            "rank=${resolved.rank}, bitrateKbps=${resolved.bitrateKbps}, bytes=${resolved.contentLength}"
     )
     return SongUrlResult.Success(
         url = resolved.url,
@@ -90,14 +100,15 @@ private fun PlayerManager.buildCustomSourceSuccess(
         expectedContentLength = resolved.contentLength,
         audioInfo = PlaybackAudioInfo(
             source = PlaybackAudioSource.CUSTOM,
-            qualityKey = qualityKey,
-            qualityLabel = qualityKey?.let { key ->
+            qualityKey = displayQualityKey,
+            qualityLabel = displayQualityKey?.let { key ->
                 qualityLabelForNetease(key) { getLocalizedString(it) }
             },
             codecLabel = deriveCodecLabel(mimeType),
             mimeType = mimeType,
             bitrateKbps = resolved.bitrateKbps
         ),
+        // 缓存键与表示指纹仍用实测值：它们描述的是"实际这条流"，与显示用哪个档位名无关。
         representationIdentity = buildCustomSourceRepresentationIdentity(resolved),
         cacheKeyOverride = buildCustomSourceCacheKey(resolved)
     )
