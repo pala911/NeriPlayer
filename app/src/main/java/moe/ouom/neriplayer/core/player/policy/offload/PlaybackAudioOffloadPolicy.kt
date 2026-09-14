@@ -18,8 +18,9 @@ internal fun requiresPcmAudioProcessing(
     audioSource: PlaybackAudioSource?,
     listenTogetherPlaybackRate: Float,
 ): Boolean {
-    // 网易云直链和 B 站换源都容易触发系统 offload 残留缓冲，主动走 PCM 管线
+    // 网易云直链、自定义音源直链和 B 站换源都容易触发系统 offload 残留缓冲，主动走 PCM 管线
     return audioSource == PlaybackAudioSource.NETEASE ||
+        audioSource == PlaybackAudioSource.CUSTOM ||
         audioSource == PlaybackAudioSource.BILIBILI ||
         usbExclusivePlaybackEnabled ||
         abs(playbackSpeed - 1f) > PLAYBACK_PARAMETER_EPSILON ||

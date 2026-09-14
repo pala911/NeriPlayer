@@ -50,6 +50,7 @@ import moe.ouom.neriplayer.core.player.quality.effectiveNeteaseQuality
 import moe.ouom.neriplayer.core.player.quality.effectiveYouTubeQuality
 import moe.ouom.neriplayer.core.player.resolver.netease.NeteasePlaybackResponseParser
 import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseAutoBiliSource
+import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseCustomSource
 import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseMatchedLocalSource
 import moe.ouom.neriplayer.core.player.watchdog.configureActivePlaybackCandidates
 import moe.ouom.neriplayer.core.player.watchdog.currentPlaybackCandidate
@@ -350,6 +351,7 @@ internal suspend fun PlayerManager.resolveSongUrl(
                 suppressError = suppressError,
                 sideEffects = resolverSideEffects,
                 allowLocalFallback = !shouldDeferNeteaseAlternateSources,
+                allowCustomSourceFallback = !shouldDeferNeteaseAlternateSources,
                 allowAutoBiliFallback = !shouldDeferNeteaseAlternateSources
             )
         }
@@ -1480,6 +1482,7 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
     sideEffects: RefreshResolverSideEffects = RefreshResolverSideEffects(),
     allowLocalFallback: Boolean = true,
     allowPreviewFallback: Boolean = true,
+    allowCustomSourceFallback: Boolean = true,
     allowAutoBiliFallback: Boolean = true
 ): SongUrlResult = withContext(Dispatchers.IO) {
     try {
@@ -1537,6 +1540,15 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
                                 "NERI-PlayerManager",
                                 "当前音质不可用，已自动降级: id=${song.id}, preferred=$effectiveQuality, resolved=$quality"
                             )
+                            // 官方只给到低于所选档位的完整流。先用自定义音源试着拿到所求档位，
+                            // 拿不到再用这条完整流——此时手上已有可播的流，所以给短预算。
+                            if (allowCustomSourceFallback) {
+                                tryResolveNeteaseCustomSource(
+                                    song = song,
+                                    requestedQualityKey = effectiveQuality,
+                                    hasPlayableFallback = true
+                                )?.let { return@withContext it }
+                            }
                         }
                         return@withContext success
                     }
@@ -1572,6 +1584,18 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
         ) {
             if (allowLocalFallback) {
                 tryResolveNeteaseMatchedLocalSource(song)?.let {
+                    return@withContext it
+                }
+            }
+            if (allowCustomSourceFallback) {
+                // 自定义音源排在 B 站自动源之前：B 站拿到的是转录/翻录视频，音质明显更差。
+                // 官方只给试听片段或无权限时，这里给足预算——试听片段（30 秒）毫无价值，
+                // 自定义源是唯一可能拿到完整无损的途径。
+                tryResolveNeteaseCustomSource(
+                    song = song,
+                    requestedQualityKey = effectiveQuality,
+                    hasPlayableFallback = false
+                )?.let {
                     return@withContext it
                 }
             }

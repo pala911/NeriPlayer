@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,8 @@ import moe.ouom.neriplayer.R
 
 enum class PlaybackSourceType {
     NETEASE,
+    /** 用户导入的 LX 自定义音源 */
+    CUSTOM,
     BILIBILI,
     YOUTUBE_MUSIC,
     LOCAL
@@ -75,6 +78,20 @@ fun PlaybackSourceBadge(
                 )
                 Text(
                     text = stringResource(R.string.nowplaying_netease_cloud),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            PlaybackSourceType.CUSTOM -> {
+                Icon(
+                    imageVector = Icons.Outlined.Extension,
+                    contentDescription = stringResource(R.string.nowplaying_custom_source),
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = stringResource(R.string.nowplaying_custom_source),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface
                 )

@@ -192,6 +192,8 @@ internal fun listenTogetherQualityRank(
     val normalized = normalizeListenTogetherQualityKey(source, qualityKey) ?: return null
     return when (source) {
         PlaybackAudioSource.NETEASE -> NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
+        // 自定义音源的档位与流地址都沿用网易云那一套。
+        PlaybackAudioSource.CUSTOM -> NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.BILIBILI -> BILI_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.YOUTUBE_MUSIC -> YOUTUBE_LISTEN_TOGETHER_QUALITY_ORDER
         PlaybackAudioSource.LOCAL -> emptyList()
@@ -217,6 +219,9 @@ private fun normalizeListenTogetherQualityKey(
         PlaybackAudioSource.NETEASE -> normalized.takeIf {
             it in NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
         }
+        PlaybackAudioSource.CUSTOM -> normalized.takeIf {
+            it in NETEASE_LISTEN_TOGETHER_QUALITY_ORDER
+        }
         PlaybackAudioSource.BILIBILI -> normalized.takeIf {
             it in BILI_LISTEN_TOGETHER_QUALITY_ORDER
         }
@@ -230,6 +235,7 @@ private fun normalizeListenTogetherQualityKey(
 private fun listenTogetherSourceKey(source: PlaybackAudioSource): String {
     return when (source) {
         PlaybackAudioSource.NETEASE -> "netease"
+        PlaybackAudioSource.CUSTOM -> "netease"
         PlaybackAudioSource.BILIBILI -> "bili"
         PlaybackAudioSource.YOUTUBE_MUSIC -> "youtube"
         PlaybackAudioSource.LOCAL -> "local"
@@ -336,6 +342,7 @@ internal fun PlayerManager.listenTogetherFallbackResult(song: SongItem): SongUrl
     val source = listenTogetherPlaybackSource(song)
     val preferredQualityKey = when (source) {
         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
+        PlaybackAudioSource.CUSTOM -> effectiveNeteaseQuality()
         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
         PlaybackAudioSource.LOCAL -> ""
@@ -371,6 +378,7 @@ internal fun PlayerManager.listenTogetherFallbackResult(song: SongItem): SongUrl
 internal fun PlayerManager.listenTogetherPreferredQualityKey(song: SongItem): String? {
     return when (listenTogetherPlaybackSource(song)) {
         PlaybackAudioSource.NETEASE -> effectiveNeteaseQuality()
+        PlaybackAudioSource.CUSTOM -> effectiveNeteaseQuality()
         PlaybackAudioSource.BILIBILI -> effectiveBiliQuality()
         PlaybackAudioSource.YOUTUBE_MUSIC -> effectiveYouTubeQuality()
         PlaybackAudioSource.LOCAL -> null
@@ -409,6 +417,11 @@ internal fun buildListenTogetherFallbackAudioInfo(
 ): PlaybackAudioInfo {
     return when (source) {
         PlaybackAudioSource.NETEASE -> buildNeteaseOfflineCacheAudioInfo(
+            preferredQualityKey = preferredQualityKey,
+            getLocalizedString = getLocalizedString
+        )
+        // 自定义音源的档位键与缓存音频信息都按网易云呈现。
+        PlaybackAudioSource.CUSTOM -> buildNeteaseOfflineCacheAudioInfo(
             preferredQualityKey = preferredQualityKey,
             getLocalizedString = getLocalizedString
         )

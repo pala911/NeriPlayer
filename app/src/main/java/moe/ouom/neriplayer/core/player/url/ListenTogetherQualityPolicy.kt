@@ -17,6 +17,7 @@ private val BILI_HIGH_FALLBACK_ORDER = listOf("high", "medium", "low")
 internal fun maxListenTogetherStreamUrlCandidates(source: PlaybackAudioSource): Int {
     return when (source) {
         PlaybackAudioSource.NETEASE -> MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
+        PlaybackAudioSource.CUSTOM -> MAX_LISTEN_TOGETHER_STREAM_URL_CANDIDATES
         PlaybackAudioSource.BILIBILI -> MAX_LISTEN_TOGETHER_BILI_STREAM_URL_CANDIDATES
         PlaybackAudioSource.YOUTUBE_MUSIC -> MAX_LISTEN_TOGETHER_YOUTUBE_STREAM_URL_CANDIDATES
         PlaybackAudioSource.LOCAL -> 0

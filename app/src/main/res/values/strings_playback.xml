@@ -173,4 +173,5 @@
     <string name="nowplaying_equalizer_wait_for_session">开始播放后会应用到当前音频会话</string>
     <string name="nowplaying_equalizer_unsupported">当前设备可能不支持系统均衡器</string>
     <string name="nowplaying_loudness_unsupported">当前设备可能不支持响度增强</string>
+    <string name="nowplaying_custom_source">自定义源</string>
 </resources>

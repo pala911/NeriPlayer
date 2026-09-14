@@ -136,4 +136,12 @@
     <string name="login_paste_bili_cookie_hint">粘贴 Cookie（例如：SESSDATA=…; bili_jct=…）</string>
     <string name="login_paste_youtube_cookie_hint">粘贴 Cookie 或浏览器请求头（需包含 Cookie）</string>
     <string name="settings_cookie_input_hint">请输入 Cookie</string>
+    <string name="settings_custom_source_enabled">自定义音源</string>
+    <string name="settings_custom_source_enabled_desc">默认关闭；开启后，网易云歌曲无权限、只返回试听片段、或仅给到低于所选档位的音质时，优先用导入的音源脚本解析，失败才回退哔哩哔哩</string>
+    <string name="settings_custom_source_import">导入音源脚本</string>
+    <string name="settings_custom_source_import_desc">支持 lx-music 的自定义音源脚本（.js）；导入后立即生效，点列表项可删除</string>
+    <string name="settings_custom_source_empty">还没有导入音源脚本</string>
+    <string name="settings_custom_source_remove">删除</string>
+    <string name="settings_custom_source_import_failed">导入失败：不是有效的音源脚本</string>
+    <string name="settings_custom_source_imported">已导入 %1$d 个音源脚本</string>
 </resources>

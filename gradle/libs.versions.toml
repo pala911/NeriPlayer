@@ -45,6 +45,7 @@ tinyPinyin = "2.0.3.RELEASE"
 uiGraphics = "1.11.4"
 workRuntimeKtx = "2.11.2"
 javascriptengine = "1.1.0"
+quickjs = "2.4.0"
 webkit = "1.16.0"
 lyriconProvider = "0.1.70"
 zxingCore = "3.5.4"
@@ -75,6 +76,7 @@ tiny-pinyin = { module = "io.github.biezhi:TinyPinyin", version.ref = "tinyPinyi
 androidx-ui-graphics = { module = "androidx.compose.ui:ui-graphics", version.ref = "uiGraphics" }
 androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workRuntimeKtx" }
 androidx-javascriptengine = { module = "androidx.javascriptengine:javascriptengine", version.ref = "javascriptengine" }
+quickjs-wrapper = { module = "wang.harlon.quickjs:wrapper-android", version.ref = "quickjs" }
 androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "webkit" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coilCompose" }
 dec = { module = "org.brotli:dec", version.ref = "dec" }

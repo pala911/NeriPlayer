@@ -1753,6 +1753,7 @@ internal fun resolveNowPlayingPlaybackSourceType(
 
     when (playbackAudioSource) {
         PlaybackAudioSource.NETEASE -> return PlaybackSourceType.NETEASE
+        PlaybackAudioSource.CUSTOM -> return PlaybackSourceType.CUSTOM
         PlaybackAudioSource.BILIBILI -> return PlaybackSourceType.BILIBILI
         PlaybackAudioSource.YOUTUBE_MUSIC -> return PlaybackSourceType.YOUTUBE_MUSIC
         PlaybackAudioSource.LOCAL,

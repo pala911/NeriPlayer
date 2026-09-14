@@ -31,6 +31,14 @@ val releaseSigningReady = releaseKeystoreFile.exists() &&
     releaseKeyAlias.isNotBlank() &&
     !releaseKeyPassword.isNullOrBlank()
 
+// debug 包默认用 AGP 自己生成的 debug keystore，而它的位置与内容在不同 CI runner 上会变，
+// 于是每次构建的签名都不同，`adb install -r` 会报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+// 只能卸载重装（丢掉应用数据）。用属性显式指定一个固定 keystore 就能避免；
+// 不传该属性时行为与原来完全一致。
+val debugKeystorePath = project.findProperty("NERI_DEBUG_KEYSTORE") as String?
+val debugKeystoreFile = debugKeystorePath?.let { project.file(it) }
+val debugSigningReady = debugKeystoreFile?.exists() == true
+
 android {
     namespace = "moe.ouom.neriplayer"
     val buildUUID = UUID.randomUUID()
@@ -45,6 +53,14 @@ android {
                 storePassword = releaseStorePassword.orEmpty()
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword.orEmpty()
+            }
+        }
+        if (debugSigningReady) {
+            create("debugFixed") {
+                storeFile = debugKeystoreFile
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
             }
         }
     }
@@ -89,6 +105,12 @@ android {
 
     buildTypes {
         val releaseSigningConfig = signingConfigs.getByName("release")
+
+        debug {
+            if (debugSigningReady) {
+                signingConfig = signingConfigs.getByName("debugFixed")
+            }
+        }
 
         release {
             isMinifyEnabled = true
@@ -328,6 +350,10 @@ dependencies {
     // WorkManager - 后台同步
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.javascriptengine)
+
+    // 自定义音源（LX Music 用户脚本）：需要可同步求值的 JS 引擎，
+    // androidx.javascriptengine 的 API 全异步、不适用于该交互模型。
+    implementation(libs.quickjs.wrapper)
 
     implementation(libs.androidx.webkit)
 

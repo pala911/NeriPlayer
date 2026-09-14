@@ -5,6 +5,8 @@ import java.util.Locale
 enum class PlaybackAudioSource {
     LOCAL,
     NETEASE,
+    /** 用户导入的 LX 自定义音源：网易云歌曲的回退来源，排在 B 站之前。 */
+    CUSTOM,
     BILIBILI,
     YOUTUBE_MUSIC
 }
@@ -137,6 +139,8 @@ data class PreferredQualityKeys(
 fun PreferredQualityKeys.forSource(source: PlaybackAudioSource): String? {
     return when (source) {
         PlaybackAudioSource.NETEASE -> netease
+        // 自定义音源是网易云的替代来源，档位沿用网易云的键。
+        PlaybackAudioSource.CUSTOM -> netease
         PlaybackAudioSource.YOUTUBE_MUSIC -> youtube
         PlaybackAudioSource.BILIBILI -> bili
         PlaybackAudioSource.LOCAL -> null

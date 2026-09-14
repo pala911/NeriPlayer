@@ -1790,6 +1790,8 @@ object PlayerManager {
         ioScope.launch {
             when (currentAudioInfo.source) {
                 PlaybackAudioSource.NETEASE -> settingsRepo.setAudioQuality(normalizedKey)
+                // 自定义音源按网易云的档位键请求音源站，所以改的是同一个偏好。
+                PlaybackAudioSource.CUSTOM -> settingsRepo.setAudioQuality(normalizedKey)
                 PlaybackAudioSource.BILIBILI -> settingsRepo.setBiliAudioQuality(normalizedKey)
                 PlaybackAudioSource.YOUTUBE_MUSIC -> settingsRepo.setYouTubeAudioQuality(normalizedKey)
                 PlaybackAudioSource.LOCAL -> Unit
@@ -2000,6 +2002,8 @@ object PlayerManager {
     ) {
         val targetJob = when (source) {
             PlaybackAudioSource.NETEASE -> ::neteaseQualityRefreshJob
+            // 自定义音源走的就是网易云那条解析链（自定义源排在最前），沿用同一个刷新任务。
+            PlaybackAudioSource.CUSTOM -> ::neteaseQualityRefreshJob
             PlaybackAudioSource.YOUTUBE_MUSIC -> ::youtubeQualityRefreshJob
             PlaybackAudioSource.BILIBILI -> ::biliQualityRefreshJob
             PlaybackAudioSource.LOCAL -> return

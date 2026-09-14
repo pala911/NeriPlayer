@@ -47,6 +47,9 @@ private fun PlayerManager.resolveTrafficAwareQuality(
     return when (source) {
         PlaybackAudioSource.NETEASE ->
             normalizeMobileDataNeteaseAudioQuality(mobileDataNeteaseAudioQuality)
+        // 自定义音源是网易云的替代来源，移动网络降级档位沿用网易云的设置。
+        PlaybackAudioSource.CUSTOM ->
+            normalizeMobileDataNeteaseAudioQuality(mobileDataNeteaseAudioQuality)
         PlaybackAudioSource.YOUTUBE_MUSIC ->
             normalizeMobileDataYouTubeAudioQuality(mobileDataYouTubeAudioQuality)
         PlaybackAudioSource.BILIBILI ->

@@ -1,0 +1,69 @@
+name: Debug APK (one-time)
+
+# 只用于手动出一个可安装的 debug APK，不参与 push/PR 流程。
+# 注意：本项目有两个 submodule 直接参与 Gradle 构建
+# (np-submodule/accompanist-lyrics-core 与 .../accompanist-lyrics-ui/src)，
+# checkout 时必须带 submodules: recursive，否则编译直接失败。
+on:
+  workflow_dispatch:
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      # runner 镜像自带 Android SDK/NDK，但 compileSdk 37 比较新，显式装一次更稳；
+      # 装不上就让 AGP 自己的下载器去解析（android.builder.sdkDownload 默认开启）。
+      - name: Ensure Android SDK 37
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" || echo "SKIP: letting AGP resolve the compile SDK"
+
+      # debug 包默认用 AGP 自己生成的 debug keystore，位置与内容随 runner 变化，
+      # 于是每次构建签名都不同，`adb install -r` 会报签名不一致、只能卸载重装丢数据。
+      # 缓存一份固定 keystore 并通过 -PNERI_DEBUG_KEYSTORE 显式指定。
+      - name: Reuse a stable debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.neri-debug/debug.keystore
+          key: neri-debug-keystore-v1
+
+      - name: Ensure debug keystore
+        run: |
+          mkdir -p ~/.neri-debug
+          if [ ! -f ~/.neri-debug/debug.keystore ]; then
+            keytool -genkeypair -v -keystore ~/.neri-debug/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -l ~/.neri-debug/debug.keystore
+          keytool -list -keystore ~/.neri-debug/debug.keystore -storepass android | tail -n 3
+
+      - name: Grant execute permission
+        run: chmod +x gradlew
+
+      - name: Assemble Debug APK
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            -PNERI_DEBUG_KEYSTORE="$HOME/.neri-debug/debug.keystore"
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeriPlayer-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 3

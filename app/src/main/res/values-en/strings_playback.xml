@@ -173,4 +173,5 @@
     <string name="nowplaying_equalizer_wait_for_session">Start playback to apply the equalizer to the active audio session.</string>
     <string name="nowplaying_equalizer_unsupported">This device may not support the system equalizer.</string>
     <string name="nowplaying_loudness_unsupported">This device may not support loudness enhancement.</string>
+    <string name="nowplaying_custom_source">Custom Source</string>
 </resources>

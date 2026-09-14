@@ -136,4 +136,12 @@
     <string name="login_paste_bili_cookie_hint">Paste Cookie (e.g.: SESSDATA=…; bili_jct=…)</string>
     <string name="login_paste_youtube_cookie_hint">Paste Cookie or browser request headers (must include Cookie)</string>
     <string name="settings_cookie_input_hint">Please enter Cookie</string>
+    <string name="settings_custom_source_enabled">Custom Source</string>
+    <string name="settings_custom_source_enabled_desc">Off by default. When enabled, imported source scripts are tried first for NetEase songs that are unavailable, return only a preview clip, or come back below the selected quality; Bilibili is the fallback.</string>
+    <string name="settings_custom_source_import">Import source script</string>
+    <string name="settings_custom_source_import_desc">Supports lx-music user-source scripts (.js). Scripts take effect immediately; tap an entry to remove it.</string>
+    <string name="settings_custom_source_empty">No source scripts imported yet</string>
+    <string name="settings_custom_source_remove">Remove</string>
+    <string name="settings_custom_source_import_failed">Import failed: not a valid source script</string>
+    <string name="settings_custom_source_imported">%1$d source script(s) imported</string>
 </resources>
