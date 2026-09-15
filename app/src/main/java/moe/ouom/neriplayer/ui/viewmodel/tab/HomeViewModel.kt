@@ -56,6 +56,12 @@ import java.io.IOException
 
 private const val TAG = "NERI-HomeVM"
 private const val HOME_NETEASE_SONG_LIMIT = 30
+/**
+ * 榜单类（热歌 / 飙升 / 新歌 / 私人雷达）背后是一个完整歌单，只取 30 首会让从这里起播
+ * 的播放队列也被截断成 30 首（请求还带了 `s = 0`，没有分页去拿剩下的）。这类来源直接
+ * 取满一页；逐条攒的流式来源（私人FM）和个性化新歌仍用 [HOME_NETEASE_SONG_LIMIT]。
+ */
+private const val HOME_NETEASE_CHART_SONG_LIMIT = 200
 private const val HOME_NETEASE_PLAYLIST_LIMIT = 30
 private const val HOME_PRIVATE_FM_MAX_BATCHES = 10
 private const val HOME_MAX_FAILURE_BEFORE_WARNING = 3
@@ -869,9 +875,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             parseNeteaseHomePlaylists(raw, limit = HOME_NETEASE_PLAYLIST_LIMIT)
         }
 
-    private suspend fun parseSongsOnWorker(raw: String): List<SongItem> =
+    private suspend fun parseSongsOnWorker(
+        raw: String,
+        limit: Int = HOME_NETEASE_SONG_LIMIT
+    ): List<SongItem> =
         withContext(Dispatchers.Default) {
-            parseNeteaseHomeSongs(raw, limit = HOME_NETEASE_SONG_LIMIT)
+            parseNeteaseHomeSongs(raw, limit = limit)
         }
 
     private suspend fun fetchSongSection(
@@ -961,7 +970,17 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val raw = withContext(Dispatchers.IO) {
             fetchSongSourceRaw(source)
         }
-        return parseSongsOnWorker(raw)
+        return parseSongsOnWorker(raw, limit = homeSongLimitFor(source))
+    }
+
+    /** 榜单类取满一页，其余板块仍按预览量取。 */
+    private fun homeSongLimitFor(source: NeteaseHomeSongSource): Int = when (source) {
+        NeteaseHomeSongSource.TOP_SOARING,
+        NeteaseHomeSongSource.TOP_HOT,
+        NeteaseHomeSongSource.TOP_NEW,
+        NeteaseHomeSongSource.PERSONAL_RADAR,
+        -> HOME_NETEASE_CHART_SONG_LIMIT
+        else -> HOME_NETEASE_SONG_LIMIT
     }
 
     /** 将首页来源的请求参数集中在一起，避免登录态契约在调用点分散 */
@@ -969,12 +988,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         return when (source) {
             NeteaseHomeSongSource.TOP_SOARING -> client.getPlaylistDetail(
                 playlistId = NETEASE_TOPLIST_SOARING_ID,
-                n = HOME_NETEASE_SONG_LIMIT,
+                n = homeSongLimitFor(source),
                 s = 0
             )
             NeteaseHomeSongSource.PERSONAL_RADAR -> client.getPlaylistDetail(
                 playlistId = NETEASE_PRIVATE_RADAR_PLAYLIST_ID,
-                n = HOME_NETEASE_SONG_LIMIT,
+                n = homeSongLimitFor(source),
                 s = 0
             )
             NeteaseHomeSongSource.DAILY_RECOMMEND -> client.getDailyRecommendedSongs(
@@ -987,12 +1006,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             )
             NeteaseHomeSongSource.TOP_HOT -> client.getPlaylistDetail(
                 playlistId = NETEASE_TOPLIST_HOT_ID,
-                n = HOME_NETEASE_SONG_LIMIT,
+                n = homeSongLimitFor(source),
                 s = 0
             )
             NeteaseHomeSongSource.TOP_NEW -> client.getPlaylistDetail(
                 playlistId = NETEASE_TOPLIST_NEW_ID,
-                n = HOME_NETEASE_SONG_LIMIT,
+                n = homeSongLimitFor(source),
                 s = 0
             )
         }
