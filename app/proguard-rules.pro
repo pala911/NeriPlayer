@@ -90,6 +90,15 @@
 
 -dontwarn android.os.ServiceManager
 
+# LX custom source runtime (added on this branch). The QuickJS wrapper calls back
+# into its own Java classes from native code, so nothing in it may be renamed or
+# dropped; the resolver/metadata classes are kept as cheap insurance because a
+# stripped field here fails only at playback time, never at compile time.
+-keep class wang.harlon.quickjs.** { *; }
+-dontwarn wang.harlon.quickjs.**
+-keep class moe.ouom.neriplayer.core.provider.lxuser.** { *; }
+-keepclassmembers class moe.ouom.neriplayer.core.provider.lxuser.** { *; }
+
 # 给 R8 更多操作空间，让真正的 shrink 生效
 -allowaccessmodification
 -repackageclasses ''

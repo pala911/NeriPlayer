@@ -38,39 +38,28 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platforms;android-37" || echo "SKIP: letting AGP resolve the compile SDK"
 
-      # debug 包默认用 AGP 自己生成的 debug keystore，位置与内容随 runner 变化，
-      # 于是每次构建签名都不同，`adb install -r` 会报签名不一致、只能卸载重装丢数据。
-      # 缓存一份固定 keystore 并通过 -PNERI_DEBUG_KEYSTORE 显式指定。
-      - name: Reuse a stable debug keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.neri-debug/debug.keystore
-          key: neri-debug-keystore-v1
-
-      - name: Ensure debug keystore
-        run: |
-          mkdir -p ~/.neri-debug
-          if [ ! -f ~/.neri-debug/debug.keystore ]; then
-            keytool -genkeypair -v -keystore ~/.neri-debug/debug.keystore \
-              -storepass android -keypass android -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-          ls -l ~/.neri-debug/debug.keystore
-          keytool -list -keystore ~/.neri-debug/debug.keystore -storepass android | tail -n 3
-
+      # 为什么改成 release：debug 包是 debuggable 的，ART 不会做 AOT 编译、
+      # baseline profile 也不生效，实测界面会掉帧（MeloX 上用户已确认同一现象）；
+      # 而且 debug 不开 minify/shrink，包体大约大一倍。
+      #
+      # 签名用仓库里固定那份 app/neri-release.jks：缓存的 keystore 不可靠，
+      # 每次构建换新密钥会让 `adb install -r` 报签名不一致、只能卸载重装丢数据。
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      - name: Assemble Debug APK
+      - name: Assemble Release APK
         run: |
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
-            -PNERI_DEBUG_KEYSTORE="$HOME/.neri-debug/debug.keystore"
+          test -f app/neri-release.jks
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace \
+            -PKEYSTORE_FILE=neri-release.jks \
+            -PKEYSTORE_PASSWORD=android \
+            -PKEY_ALIAS=androiddebugkey \
+            -PKEY_PASSWORD=android
 
-      - name: Upload Debug APK
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: NeriPlayer-debug-${{ github.sha }}
-          path: app/build/outputs/apk/debug/*.apk
+          name: NeriPlayer-release-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 3
