@@ -60,6 +60,7 @@ import moe.ouom.neriplayer.core.player.quality.effectiveNeteaseQuality
 import moe.ouom.neriplayer.core.player.quality.effectiveYouTubeQuality
 import moe.ouom.neriplayer.platform.netease.api.playback.parser.NeteasePlaybackResponseParser
 import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseAutoBiliSource
+import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseCustomSource
 import moe.ouom.neriplayer.core.player.resolver.netease.tryResolveNeteaseMatchedLocalSource
 import moe.ouom.neriplayer.core.player.watchdog.configureActivePlaybackCandidates
 import moe.ouom.neriplayer.core.player.watchdog.currentPlaybackCandidate
@@ -379,6 +380,7 @@ internal suspend fun PlayerManager.resolveSongUrl(
                 suppressError = suppressError,
                 sideEffects = resolverSideEffects,
                 allowLocalFallback = !shouldDeferNeteaseAlternateSources,
+                allowCustomSourceFallback = !shouldDeferNeteaseAlternateSources,
                 allowAutoBiliFallback = !shouldDeferNeteaseAlternateSources
             )
         }
@@ -1625,6 +1627,7 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
     sideEffects: RefreshResolverSideEffects = RefreshResolverSideEffects(),
     allowLocalFallback: Boolean = true,
     allowPreviewFallback: Boolean = true,
+    allowCustomSourceFallback: Boolean = true,
     allowAutoBiliFallback: Boolean = true
 ): SongUrlResult = withContext(Dispatchers.IO) {
     try {
@@ -1677,11 +1680,26 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
                         }
                     }
                     if (parsed.notice != NeteasePlaybackResponseParser.Notice.PREVIEW_CLIP) {
-                        if (quality != effectiveQuality) {
+                        // 只比"实际返回"的档位与所选档位。免费歌曲的典型情况是：请求母带，
+                        // 官方正常返回 200 + exhigh 完整流，此时请求的候选档位恰好等于所选档位，
+                        // 若拿请求档位去比就会误判成"已达所选音质"，于是免费歌曲永远停在官方给的那一档，
+                        // 只有（返回试听片段的）VIP 歌曲才会去找自定义源。
+                        val actualQualityKey = success.audioInfo?.qualityKey
+                        if (isNeteaseQualityBelowRequested(actualQualityKey, effectiveQuality)) {
                             NPLogger.w(
                                 "NERI-PlayerManager",
-                                "当前音质不可用，已自动降级: id=${song.id}, preferred=$effectiveQuality, resolved=$quality"
+                                "官方档位低于所选，尝试自定义音源: id=${song.id}, " +
+                                    "preferred=$effectiveQuality, actual=${actualQualityKey ?: "unknown"}"
                             )
+                            if (allowCustomSourceFallback) {
+                                // 给足预算：此时手上虽然有一条可播的完整流，但用户选的是更高档位，
+                                // 拿不到才回退官方那条，所以等一等只为质量、不影响可用性。
+                                tryResolveNeteaseCustomSource(
+                                    song = song,
+                                    requestedQualityKey = effectiveQuality,
+                                    hasPlayableFallback = false
+                                )?.let { return@withContext it }
+                            }
                         }
                         return@withContext success
                     }
@@ -1717,6 +1735,18 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
         ) {
             if (allowLocalFallback) {
                 tryResolveNeteaseMatchedLocalSource(song)?.let {
+                    return@withContext it
+                }
+            }
+            if (allowCustomSourceFallback) {
+                // 自定义音源排在 B 站自动源之前：B 站拿到的是转录/翻录视频，音质明显更差。
+                // 官方只给试听片段或无权限时，这里给足预算——试听片段（30 秒）毫无价值，
+                // 自定义源是唯一可能拿到完整无损的途径。
+                tryResolveNeteaseCustomSource(
+                    song = song,
+                    requestedQualityKey = effectiveQuality,
+                    hasPlayableFallback = false
+                )?.let {
                     return@withContext it
                 }
             }
@@ -1765,6 +1795,28 @@ private suspend fun PlayerManager.getNeteaseSongUrl(
         }
         SongUrlResult.Failure
     }
+}
+
+/**
+ * 官方实际返回的档位是否低于所选档位。
+ *
+ * 档位高低用 [NETEASE_QUALITY_FALLBACK_ORDER] 的索引表示（越靠前档位越高）。识别不出实际档位时
+ * 按"低于"处理，交给自定义音源试一次——宁可多试一次，也不要把免费歌曲永久钉在官方那一档。
+ */
+private fun isNeteaseQualityBelowRequested(
+    actualQualityKey: String?,
+    requestedQualityKey: String
+): Boolean {
+    val requested = neteaseQualityOrderIndex(requestedQualityKey)
+    if (requested < 0) return false
+    val actual = neteaseQualityOrderIndex(actualQualityKey)
+    if (actual < 0) return true
+    return actual > requested
+}
+
+private fun neteaseQualityOrderIndex(qualityKey: String?): Int {
+    val normalized = normalizeNeteaseQualityKey(qualityKey) ?: return -1
+    return NETEASE_QUALITY_FALLBACK_ORDER.indexOf(normalized)
 }
 
 private suspend fun PlayerManager.getBiliAudioUrl(

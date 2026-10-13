@@ -31,6 +31,8 @@ dependencies {
     implementation(project(":model"))
     implementation(project(":local"))
     implementation(project(":sync"))
+    // AutoSettingSpec / autoSwitchSetting：自定义音源开关的字面量设置项声明。
+    implementation(project(":ksp-annotations"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.media)
     implementation(libs.androidx.media3.exoplayer)
@@ -44,6 +46,10 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.icons)
     implementation(libs.androidx.appcompat)
+
+    // 自定义音源（LX Music 用户脚本）：需要可同步求值的 JS 引擎，
+    // androidx.javascriptengine 的 API 全异步、不适用于该交互模型。
+    implementation(libs.quickjs.wrapper)
 
     // HyperOS Focus notifications and privileged UID network control.
     implementation(libs.focus.api)

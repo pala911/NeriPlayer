@@ -73,6 +73,7 @@ import moe.ouom.neriplayer.ui.settings.AutoSettingsSwitchItems
 import moe.ouom.neriplayer.ui.settings.route.AppSettingsHostBindings
 import moe.ouom.neriplayer.ui.component.settings.LanguageSettingItem
 import moe.ouom.neriplayer.ui.effect.glass.LocalAdvancedGlassController
+import moe.ouom.neriplayer.ui.screen.tab.settings.component.CustomSourceSetting
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.LazyAnimatedVisibility
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.playback.PlaybackServiceIdleShutdownSetting
 import moe.ouom.neriplayer.ui.screen.tab.settings.component.playback.SettingsAudioQualitySection
@@ -898,6 +899,11 @@ internal fun SettingsScreen(
                                     onClick = {
                                         playbackActions.onNeteaseAutoSourceSwitchChange(!playbackState.playbackSources.neteaseAutoSourceSwitch)
                                     }
+                                )
+                                CustomSourceSetting(
+                                    highlightTargetId = settingsHighlightTargetId,
+                                    highlightPulse = settingsHighlightPulse,
+                                    onHighlightFinished = onSettingsHighlightFinished
                                 )
                             }
                         },

@@ -17,6 +17,14 @@ data class PlaybackQualityOption(
 data class PlaybackAudioInfo(
     val source: PlaybackAudioSource,
     val isNeteaseLocalFallback: Boolean = false,
+    /**
+     * 这条流来自用户导入的自定义音源（LX Music 用户脚本），而不是网易云官方直链。
+     *
+     * 刻意不新增 `PlaybackAudioSource` 枚举值：source 保持 NETEASE，于是档位偏好、移动网络降级、
+     * 一起听、缓存描述与 offload 策略等所有按 source 分派的逻辑都自动复用网易云那一套，
+     * 只有播放页角标需要区分——它读这个标记。改动面小一个数量级，也不会让下游的穷举 when 编译失败。
+     */
+    val isCustomSource: Boolean = false,
     val qualityKey: String? = null,
     val qualityLabel: String? = null,
     val qualityOptions: List<PlaybackQualityOption> = emptyList(),

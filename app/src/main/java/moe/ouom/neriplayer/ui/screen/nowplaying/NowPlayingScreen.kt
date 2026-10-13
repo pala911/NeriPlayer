@@ -352,12 +352,16 @@ internal fun resolveNowPlayingPlaybackSourceType(
     isFromBiliTag: Boolean,
     currentMediaUrl: String?,
     playbackAudioSource: PlaybackAudioSource?,
-    isNeteaseLocalFallback: Boolean = false
+    isNeteaseLocalFallback: Boolean = false,
+    isCustomSource: Boolean = false
 ): PlaybackSourceType? {
     if (isLocalSong || isNeteaseLocalFallback) return PlaybackSourceType.LOCAL
 
     when (playbackAudioSource) {
-        PlaybackAudioSource.NETEASE -> return PlaybackSourceType.NETEASE
+        // 自定义音源底层走的仍是 NETEASE，只有角标要区分。
+        PlaybackAudioSource.NETEASE -> {
+            return if (isCustomSource) PlaybackSourceType.CUSTOM else PlaybackSourceType.NETEASE
+        }
         PlaybackAudioSource.BILIBILI -> return PlaybackSourceType.BILIBILI
         PlaybackAudioSource.YOUTUBE_MUSIC -> return PlaybackSourceType.YOUTUBE_MUSIC
         PlaybackAudioSource.LOCAL,
@@ -531,7 +535,8 @@ fun NowPlayingScreen(
         isFromBiliTag = isFromBiliTag,
         currentMediaUrl = currentMediaUrl,
         playbackAudioSource = currentPlaybackAudioInfo?.source,
-        isNeteaseLocalFallback = currentPlaybackAudioInfo?.isNeteaseLocalFallback == true
+        isNeteaseLocalFallback = currentPlaybackAudioInfo?.isNeteaseLocalFallback == true,
+        isCustomSource = currentPlaybackAudioInfo?.isCustomSource == true
     )
     val playbackSourceSongKey = currentSong?.let {
         listOf(it.id.toString(), it.album, it.mediaUri.orEmpty(), it.localFilePath.orEmpty())
