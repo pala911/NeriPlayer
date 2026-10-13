@@ -1,0 +1,65 @@
+name: Release APK (fork)
+
+# 只用于出一个可安装的 APK，不参与上游项目的测试/发布流程。
+#
+# 注意：本项目有两个 submodule 直接参与 Gradle 构建
+# (np-submodule/accompanist-lyrics-core 与 .../accompanist-lyrics-ui/src)，
+# checkout 时必须带 submodules: recursive，否则编译直接失败。
+#
+# 为什么用 push 触发而不是只用 workflow_dispatch：GitHub 只注册默认分支上的 workflow，
+# 这个文件只存在于功能分支时 dispatch 会返回 404。push 触发不受该限制。
+on:
+  push:
+    branches:
+      - lx-custom-source-v2
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Gradle 9.6 + AGP 9.4 需要 JDK 21 跑构建；产物字节码仍是 Java 17。
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      # runner 镜像自带 Android SDK/NDK，但 compileSdk 37 比较新，显式装一次更稳；
+      # 装不上就让 AGP 自己的下载器去解析（android.builder.sdkDownload 默认开启）。
+      - name: Ensure Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" || echo "SKIP: letting AGP resolve the compile SDK"
+
+      # 用 release 而不是 debug：debug 包不会做 AOT 编译、baseline profile 也不生效，
+      # 实测界面会掉帧；而且 debug 不开 minify/shrink，包体大约大一倍。
+      #
+      # 签名用仓库里固定那份 app/neri-release.jks：缓存的 keystore 不可靠，
+      # 每次构建换新密钥会让 `adb install -r` 报签名不一致、只能卸载重装丢数据。
+      - name: Grant execute permission
+        run: chmod +x gradlew
+
+      - name: Assemble Release APK
+        run: |
+          test -f app/neri-release.jks
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace \
+            -PKEYSTORE_FILE=neri-release.jks \
+            -PKEYSTORE_PASSWORD=android \
+            -PKEY_ALIAS=androiddebugkey \
+            -PKEY_PASSWORD=android
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeriPlayer-release-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 3

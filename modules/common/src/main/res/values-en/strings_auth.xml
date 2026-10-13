@@ -127,4 +127,12 @@
     <string name="auth_storage_unavailable_message">Both system secure storage and compatibility encrypted storage are unavailable, so this account cannot be kept after a restart. This sign-in or import has been blocked. Restore device storage and system security services, then try again.</string>
     <string name="auth_storage_save_failed">Cannot save account credentials. Check device storage and system security services, then try again</string>
     <string name="auth_storage_clear_failed">Cannot clear the saved account. Check device storage, then try again</string>
+    <string name="settings_custom_source_enabled">Custom Source</string>
+    <string name="settings_custom_source_enabled_desc">Off by default. When enabled, imported source scripts are tried first for NetEase songs that are unavailable, return only a preview clip, or come back below the selected quality; Bilibili is the fallback.</string>
+    <string name="settings_custom_source_import">Import source script</string>
+    <string name="settings_custom_source_import_desc">Supports lx-music user-source scripts (.js). Scripts take effect immediately; tap an entry to remove it.</string>
+    <string name="settings_custom_source_empty">No source scripts imported yet</string>
+    <string name="settings_custom_source_remove">Remove</string>
+    <string name="settings_custom_source_import_failed">Import failed: not a valid source script</string>
+    <string name="settings_custom_source_imported">%1$d source script(s) imported</string>
 </resources>
